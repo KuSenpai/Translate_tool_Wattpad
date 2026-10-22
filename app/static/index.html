@@ -187,7 +187,8 @@
 
   <div class="workspace">
     <div class="pane">
-      <div class="pane-head">Korean Original <span class="muted small" id="koMeta"></span></div>
+      <div class="pane-head">Korean Original <span class="muted small" id="koMeta"></span>
+        <button class="ghost small" id="koEditBtn" title="Sửa lỗi trong bản Hàn (chính tả, thiếu/thừa đoạn…). Lưu cùng draft (Ctrl+S); file Word gốc không bị ghi. Reset trả về bản Hàn trong Word.">✏ Sửa bản Hàn</button></div>
       <div class="pane-body ko" id="koPane"></div>
     </div>
     <div class="pane">
@@ -229,6 +230,7 @@
             <select id="rtParallel"><option value="1">1 — không chia</option><option value="2">2 phần</option><option value="3" selected>3 phần</option><option value="4">4 phần</option></select>
           </label>
           <label class="check small" title="Nếu bản dịch vi phạm glossary (dùng từ bị cấm, sót chữ Hàn…), tự dịch lại thêm một lần kèm danh sách lỗi. Chậm và tốn gấp đôi."><input type="checkbox" id="rtAutoFix" checked> Tự dịch lại nếu vi phạm glossary</label>
+          <label class="check small" title="Gửi bản tiếng Việt đang sửa cho AI: đối chiếu với bản Hàn và chỉ sửa chỗ sai (nghĩa, thuật ngữ, xưng hô, chính tả), giữ nguyên câu đã đúng."><input type="checkbox" id="rtRevise"> Sửa bản dịch hiện có (không dịch lại từ đầu)</label>
           <div class="row"><button class="primary" id="rtStart">Dịch lại chương này</button></div>
           <div id="rtResult" class="small"></div>
         </details>

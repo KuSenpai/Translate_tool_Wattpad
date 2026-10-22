@@ -42,8 +42,11 @@ def validate_translation(vi_blocks: list[Block], ko_blocks: list[Block], glossar
     for e in glossary:
         src, tgt = e["source"], e["target"]
         for bad in e.get("avoid", []):
+            # Whole word, exact case, and not inside the correct rendering itself: “LA” must not hit “làm”/“lại”,
+            # “Vô Hạn” must not hit “Vô hạn”, “Lưỡi Gió” must not hit “Lưỡi Gió (Wind Cutter)”.
+            pat = re.compile(rf"(?<!\w){re.escape(bad)}(?!\w)")
             for i, b in enumerate(vi_blocks):
-                if bad.lower() in b.text.lower():
+                if pat.search(b.text.replace(tgt, "\0")):
                     issues.append(_issue("warn", f"Glossary: dùng “{bad}” — nên là “{tgt}”.", i))
         if _HANGUL.search(src):
             if src in ko_text and tgt.lower() not in vi_lower:

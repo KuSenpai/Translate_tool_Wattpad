@@ -106,7 +106,13 @@
     } else {
       document.execCommand("selectAll", false);
       document.execCommand("insertText", false, value);
+      if (norm(el.innerText) !== norm(value)) el.textContent = value;
     }
+    // Wattpad copies the title into its own model on key/blur events. In a background tab focus()/blur() fire no
+    // events, so the text sat in the page while Wattpad saved "Untitled Part N": send the events ourselves.
+    for (const type of ["input", "keyup", "change"]) el.dispatchEvent(new Event(type, { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    el.dispatchEvent(new FocusEvent("blur"));
     el.blur();
   }
   function bodyMatches(el, text) {
@@ -504,6 +510,19 @@
     }
   }
 
+  async function saveNow() {
+    const save = byText(cfg.selectors.save_texts);
+    if (save && isEnabled(save)) { save.click(); await sleep(2500); } else await sleep(3000); // autosave
+  }
+  // The part's title as stored by Wattpad; null when it cannot be told (the check then never blocks publishing).
+  async function savedTitle(task, partId) {
+    try {
+      const j = await getJson(`/api/v3/stories/${task.story_id}?fields=parts(id,title)`);
+      const p = (j.parts || []).find((x) => String(x.id) === String(partId));
+      return p && typeof p.title === "string" ? norm(p.title) : null;
+    } catch { return null; }
+  }
+
   async function fill(task, partId) {
     await event(task, { stage: "filling", part_id: partId, message: "Đang điền tiêu đề và nội dung…" });
     banner("Đang điền tiêu đề và nội dung…", true, () => cancel(task));
@@ -523,8 +542,16 @@
       await sleep(800);
       if (!bodyMatches(body, task.text)) return fail(task, "WATTPAD_PUBLISH_FAILED", "Không chèn được nội dung vào editor Wattpad.");
     }
-    const save = byText(cfg.selectors.save_texts);
-    if (save && isEnabled(save)) { save.click(); await sleep(2500); } else await sleep(3000); // autosave
+    await saveNow();
+    for (let i = 0; ; i++) { // the title Wattpad itself has stored, not what the page shows
+      const got = await savedTitle(task, partId);
+      if (got == null || got === norm(task.title)) break;
+      if (i === 1) return fail(task, "WATTPAD_TITLE_NOT_SAVED", `Wattpad vẫn lưu tiêu đề “${got}” thay vì “${task.title}”, `
+        + "nên chưa bấm Publish. Hãy sửa tiêu đề trên Wattpad rồi tự bấm Publish.");
+      await event(task, { message: `Wattpad chưa nhận tiêu đề (đang là “${got}”) — điền lại…` });
+      setTitle(title, task.title);
+      await saveNow();
+    }
     task.stage = "filled";
     await event(task, { stage: "filled", message: "Đã điền và lưu." });
     return true;
@@ -702,7 +729,7 @@
     return (ps.length ? ps : (doc.body.textContent || "").split("\n").map((l) => l.trim())).filter(Boolean).join("\n");
   }
   async function getJson(url) {
-    const r = await fetch(url, { credentials: "include" });
+    const r = await fetch(url, { credentials: "include", cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status} (${url.split("?")[0]})`);
     return r.json();
   }

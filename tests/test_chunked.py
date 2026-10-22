@@ -72,3 +72,44 @@ def test_parts_start_staggered(monkeypatch):
     translate_parallel(Slow(), heading="H", paragraphs=[f"p{i:03d}" for i in range(90)], glossary_text="", prev_tail=[], style="s", parts=3)
     starts.sort()
     assert starts[1] - starts[0] >= 0.25 and starts[2] - starts[1] >= 0.25
+
+
+def test_refused_piece_is_bisected_and_only_the_bad_paragraph_stays_korean():
+    from app.ai.novel_translator import LLMRefused
+
+    class Picky(Fake):
+        def translate(self, **kw):
+            if "p013" in kw["paragraphs"]:
+                raise LLMRefused("403")
+            return super().translate(**kw)
+
+    paras = [f"p{i:03d}" for i in range(40)]
+    r = translate_parallel(Picky(), heading="H", paragraphs=paras, glossary_text="", prev_tail=[], style="s", parts=2)
+    assert len(r.paragraphs) == 40
+    assert r.paragraphs[13] == chunked.REFUSED_MARK + "p013"
+    assert [p for p in r.paragraphs if p.startswith(chunked.REFUSED_MARK)] == [chunked.REFUSED_MARK + "p013"]
+    assert r.paragraphs[12] == "vi-p012" and r.paragraphs[14] == "vi-p014"
+
+
+def test_halves_of_a_refused_piece_run_at_the_same_time():
+    import time
+    from app.ai.novel_translator import LLMRefused
+    busy, peak, lock = [0], [0], threading.Lock()
+
+    class SlowPicky(Fake):
+        def translate(self, **kw):
+            with lock:
+                busy[0] += 1
+                peak[0] = max(peak[0], busy[0])
+            try:
+                time.sleep(0.3)
+                if "p013" in kw["paragraphs"]:
+                    raise LLMRefused("403")
+                return super().translate(**kw)
+            finally:
+                with lock:
+                    busy[0] -= 1
+
+    paras = [f"p{i:03d}" for i in range(40)]
+    r = translate_parallel(SlowPicky(), heading="H", paragraphs=paras, glossary_text="", prev_tail=[], style="s", parts=1)
+    assert peak[0] == 2 and len(r.paragraphs) == 40 and r.paragraphs[14] == "vi-p014"

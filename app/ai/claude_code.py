@@ -24,7 +24,7 @@ from .llm_service import LLMAuthError, LLMEmptyResponse, LLMError, LLMRateLimit,
 log = get_logger("CLAUDE-CODE")
 _ENV_DROP = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
              "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_PROFILE")
-_USAGE_LIMIT = re.compile(r"usage limit|limit reached|hit your (?:usage )?limit|5-hour limit|weekly limit|out of (?:extra )?usage",
+_USAGE_LIMIT = re.compile(r"usage limit|limit reached|hit your (?:\w+ )?limit|5-hour limit|weekly limit|out of (?:extra )?usage",
                           re.IGNORECASE)
 
 
@@ -138,6 +138,9 @@ class ClaudeCodeJSON:
         if obj.get("is_error"):
             if "not logged in" in text.lower() or "/login" in text:
                 raise LLMAuthError("Claude Code chưa đăng nhập. Chạy:  claude auth login --claudeai", code="CLAUDE_CODE_LOGIN")
+            if "does not support this model" in text or "claude update" in text:
+                raise LLMAuthError("Claude Code quá cũ cho model này. Chạy:  npm install -g @anthropic-ai/claude-code@latest",
+                                   code="CLAUDE_CODE_UPDATE")
             if _USAGE_LIMIT.search(text):
                 raise LLMUsageLimit(f"Đã hết lượt dùng của gói Claude: {text[:200]}")
             if obj.get("api_error_status") in (429, 529) or "overloaded" in text.lower() or "rate limit" in text.lower():

@@ -315,6 +315,8 @@ async function loadJobs() {
   clearTimeout(T.pollTimer);
   if (details.some((j) => j.running || ["running", "pausing", "queued"].includes(j.status)) && !$("#viewTranslate").classList.contains("hidden")) {
     T.pollTimer = setTimeout(loadJobs, 2500);
+  } else if (details.some((j) => j.auto_resume_at) && !$("#viewTranslate").classList.contains("hidden")) {
+    T.pollTimer = setTimeout(loadJobs, 60000);   // waiting for a usage limit to reset: notice the automatic resume
   }
 }
 

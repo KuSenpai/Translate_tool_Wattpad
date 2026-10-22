@@ -42,6 +42,8 @@ class FakeWattpad:
         self.confirm_style = "native"           # modern flow: "native" | "layer" | "two_step"
         self.frozen_menu = False                # the editor's New Part button never turns visible (background tab)
         self.trusted_new_part = False           # the editor's New Part ignores script-made clicks (only a real mouse works)
+        self.title_model = False                # the editor takes the title into its model on key events only
+        self.title_locked = False               # saving never changes a part's title (it stays "Untitled Part N")
         self.trap_clicks = 0                    # presses of the story page's "+ New Part" (it opens nothing)
         self.existing: dict[str, str] = {}      # story id -> id of the first pre-existing (published) chapter
         self.old: dict[str, dict] = {}          # chapters that existed before the test (`parts` only holds new ones)
@@ -64,6 +66,7 @@ class FakeWattpad:
         self.trap_clicks = 0
         self.flaky_failures = {"333": 1}
         self.confirm_style, self.frozen_menu, self.trusted_new_part = "native", False, False
+        self.title_model = self.title_locked = False
 
     def find(self, pid: str):
         return self.old.get(pid) or self.parts.get(pid)
@@ -132,6 +135,11 @@ class FakeWattpad:
                     trending = "".join(f'<a href="/story/{n}">.</a>' for n in (319781399, 351599673, 90623050))
                     login = "" if self._logged_in() else '<a href="/login">Log in</a>'
                     return self._send(body=f"<header>{login}</header><h3>Trending</h3>{trending}")
+                m = re.fullmatch(r"/api/v3/stories/(\d+)", path)
+                if m and self._logged_in():      # the parts of a story, drafts included, as Wattpad stored them
+                    parts = [{"id": int(p), "title": fake.find(p)["title"], "draft": not fake.find(p)["published"]}
+                             for p in fake.order.get(m.group(1), [])]
+                    return self._send(200, json.dumps({"parts": parts}), "application/json")
                 if path.startswith("/myworks") and not self._logged_in():
                     return self._redirect("/")
                 if path == "/myworks":
@@ -173,6 +181,7 @@ class FakeWattpad:
                                           .replace("__ROWS__", json.dumps(rows).replace("</", "<\\/"))
                                           .replace("__PART__", m.group(2)).replace("__STORY__", part["story"])
                                           .replace("__CONFIRM__", fake.confirm_style)
+                                          .replace("__TITLE_MODEL__", "true" if fake.title_model else "false")
                                           .replace("__TRUSTED__", "true" if fake.trusted_new_part else "false")
                                           .replace("__FROZEN__", "visibility:hidden" if fake.frozen_menu else ""))
                     return self._send(body=EDITOR.replace("__PART__", m.group(2)))
@@ -195,7 +204,9 @@ class FakeWattpad:
                 if not m or fake.find(m.group(2)) is None or not self._logged_in():
                     return self._send(403, "{}", "application/json")
                 part = fake.find(m.group(2))
-                part.update(title=body["title"], html=body["html"], text=body["text"])
+                part.update(html=body["html"], text=body["text"])
+                if not fake.title_locked:
+                    part["title"] = body["title"]
                 if m.group(1) == "publish":
                     if fake.flaky_failures.get(part["story"], 0) > 0:
                         fake.flaky_failures[part["story"]] -= 1
@@ -268,12 +279,14 @@ EDITOR_MODERN = """<!doctype html><html><body>
      style="min-height:200px;border:1px solid #ccc"></div>
 <div id="toasts"></div>
 <script>
-const story = "__STORY__", CONFIRM = "__CONFIRM__", TRUSTED = __TRUSTED__;
+const story = "__STORY__", CONFIRM = "__CONFIRM__", TRUSTED = __TRUSTED__, TITLE_MODEL = __TITLE_MODEL__;
 let part = "__PART__";
 const parts = __ROWS__;
 const $ = (s) => document.querySelector(s);
 const editor = () => $('.story-editor');
-const payload = () => ({title: $('#story-title').innerText, html: editor().innerHTML, text: editor().innerText});
+let titleModel = null;   // TITLE_MODEL: like Wattpad, the saved title is the model's, updated on key events only
+const payload = () => ({title: TITLE_MODEL ? titleModel : $('#story-title').innerText, html: editor().innerHTML, text: editor().innerText});
+$('#story-title').addEventListener('keyup', () => { titleModel = $('#story-title').innerText; });
 const words = () => editor().innerText.split(/\\s+/).filter(Boolean).length;
 function toast(t) { $('#toasts').innerHTML = '<div class="snackbar" role="status">' + t + '</div>'; }
 function layer(inner) {
@@ -295,7 +308,7 @@ function list() {
     (r.published ? 'published' : '') + '">' + (r.published ? 'Published' : 'Draft') + '</span></div></a></li>').join('');
 }
 function render(st) {
-  $('#story-title').innerText = st.title; editor().innerHTML = st.html; $('#toasts').innerHTML = '';
+  $('#story-title').innerText = titleModel = st.title; editor().innerHTML = st.html; $('#toasts').innerHTML = '';
   $('#pubslot').innerHTML = st.published ? '<button class="x-un">Unpublish</button>' : '<button class="x-pub">Publish</button>';
   const b = $('.x-pub'); if (b) b.onclick = askPublish;
   header(st.published); list();

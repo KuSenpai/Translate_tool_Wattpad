@@ -37,6 +37,24 @@ OUT_DIR = config.OUTPUT_DIR / "translations"
 RETRYABLE = (LLMRateLimit, LLMTimeout)
 
 
+def reset_delay(text: str, now: Optional[float] = None) -> float:
+    """Seconds until a usage limit resets, read from the provider's message (+2 min margin);
+    30 min when the message gives no time (the job just tries again then)."""
+    from datetime import datetime, timedelta
+    now = time.time() if now is None else now
+    if m := re.search(r"\|(\d{10})\b", text):                          # Claude Code: "...limit reached|1790000000"
+        at = float(m.group(1))
+    elif m := re.search(r"resets? in\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", text, re.I):
+        at = now + int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + int(m.group(3) or 0)  # Antigravity
+    elif m := re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)", text, re.I):   # Claude Code: "resets 5pm"
+        h = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        when = datetime.fromtimestamp(now).replace(hour=h, minute=int(m.group(2) or 0), second=0, microsecond=0)
+        at = (when if when.timestamp() > now else when + timedelta(days=1)).timestamp()
+    else:
+        return 30 * 60
+    return min(max(at - now, 0) + 120, 24 * 3600)
+
+
 class TranslateError(AppError):
     code = "TRANSLATE_ERROR"
 
@@ -146,9 +164,12 @@ class TranslationManager:
         return _read_json(self._dir(jid) / "results" / f"{idx}.json")
 
     def _recover(self) -> None:
-        """After a restart, jobs that were running are paused (the user resumes them)."""
+        """After a restart, jobs that were running are paused (the user resumes them); jobs waiting for a
+        usage limit to reset get their automatic resume scheduled again."""
         for f in JOBS.glob("*/job.json"):
             job = _read_json(f)
+            if job and job.get("status") == "paused" and job.get("auto_resume_at"):
+                self._schedule_resume(job["id"], job["auto_resume_at"])
             if job and job.get("status") == "running":
                 job["status"], job["message"] = "paused", "Tạm dừng vì tool đã khởi động lại — bấm Tiếp tục."
                 _write_json(f, job)
@@ -211,9 +232,25 @@ class TranslationManager:
         projected = round(job["cost_usd"] / done * (done + remaining), 2) if done else None
         return {k: job.get(k) for k in ("id", "sid", "name", "kind", "model", "effort", "concurrency", "status",
                                          "message", "created_at", "updated_at", "cost_usd", "usage", "output",
-                                         "glossary_project")} | {
+                                         "glossary_project", "auto_resume_at")} | {
             "counts": counts, "total": len(job["chapters"]), "projected_cost_usd": projected,
             "running": jid_alive(self, job["id"])}
+
+    def _schedule_resume(self, jid: str, at: float) -> None:
+        # ponytail: in-process timer; survives restarts only through auto_resume_at + _recover
+        timer = threading.Timer(max(0.0, at - time.time()), self._auto_resume, (jid, at))
+        timer.daemon = True
+        timer.start()
+
+    def _auto_resume(self, jid: str, at: float) -> None:
+        try:
+            job = self._job(jid)
+        except NotFound:
+            return
+        if job.get("auto_resume_at") != at or job["status"] != "paused":
+            return          # resumed / paused by hand, or rescheduled since
+        log.info("Job %s: usage limit should have reset — resuming", jid)
+        self.start(jid)
 
     def start(self, jid: str) -> dict:
         with self._lock:
@@ -223,6 +260,7 @@ class TranslationManager:
             if job["status"] == "done" and not any(c["status"] != "done" for c in job["chapters"]):
                 return self.get(jid)
             job["status"], job["message"] = "running", "Đang dịch…"
+            job.pop("auto_resume_at", None)
             self._save(job)
             stop = threading.Event()
             self._stop[jid] = stop
@@ -238,6 +276,9 @@ class TranslationManager:
             job = self._job(jid)
             if job["status"] == "running":
                 job["status"], job["message"] = "pausing", "Đang dừng sau khi xong các chương đang dịch…"
+                self._save(job)
+            elif job.pop("auto_resume_at", None):           # cancel a scheduled automatic resume
+                job["message"] = "Đã tạm dừng (huỷ tự động tiếp tục). Bấm Tiếp tục để dịch phần còn lại."
                 self._save(job)
         return self.get(jid)
 
@@ -358,7 +399,7 @@ class TranslationManager:
                     error, code = e.message, e.code
                     usage = (e.details or {}).get("usage", {})
                     if code == "AI_USAGE_LIMIT":      # subscription / quota used up: pause the whole job
-                        fatal.append(e.message + " — bấm Tiếp tục khi gói / hạn mức được làm mới.")
+                        fatal.append(e.message + " — tự động tiếp tục khi gói / hạn mức được làm mới.")
                         stop.set()
                         break
                     if isinstance(e, LLMRefused) or code in ("AI_BAD_MODEL",):
@@ -387,7 +428,7 @@ class TranslationManager:
                             j["auto_terms"].setdefault(t["source"].strip(), t["target"].strip())
                     c["status"], c["error"] = "done", warn
                     log.info("Chapter %d done (%s)", src.number, warn or "ok")
-                elif code in ("AI_USAGE_LIMIT", "CLAUDE_CODE_LOGIN", "CLAUDE_CODE_MISSING", "ANTIGRAVITY_LOGIN",
+                elif code in ("AI_USAGE_LIMIT", "CLAUDE_CODE_LOGIN", "CLAUDE_CODE_MISSING", "CLAUDE_CODE_UPDATE", "ANTIGRAVITY_LOGIN",
                               "ANTIGRAVITY_MISSING", "AI_INVALID_KEY", "AI_NOT_CONFIGURED"):
                     c["status"], c["error"] = "pending", None          # not this chapter's fault: retry on resume
                     log.warning("Chapter %d not translated: %s %s", src.number, code, error)
@@ -405,17 +446,24 @@ class TranslationManager:
         except Exception as e:
             log.exception("Output build failed: %s", e)
         j = self._job(jid)
-        if fatal:
-            self._finish(jid, "paused" if "Tiếp tục khi gói" in fatal[0] else "error", fatal[0])
+        if fatal and "tiếp tục khi gói" in fatal[0]:      # usage limit: wait for the reset, then go on by itself
+            at = time.time() + reset_delay(fatal[0])
+            when = time.strftime("%H:%M %d/%m", time.localtime(at))
+            self._finish(jid, "paused", f"{fatal[0].split(' — ')[0]} — tự động tiếp tục lúc {when}.", auto_resume_at=at)
+            self._schedule_resume(jid, at)
+        elif fatal:
+            self._finish(jid, "error", fatal[0])
         elif stop.is_set():
             self._finish(jid, "paused", "Đã tạm dừng. Bấm Tiếp tục để dịch phần còn lại.")
         else:
             failed = sum(c["status"] == "failed" for c in j["chapters"])
             self._finish(jid, "done", f"Xong. {failed} chương lỗi — bấm “Dịch lại chương lỗi”." if failed else "Đã dịch xong tất cả.")
 
-    def _finish(self, jid: str, status: str, message: str) -> None:
+    def _finish(self, jid: str, status: str, message: str, auto_resume_at: Optional[float] = None) -> None:
         with self._lock:
             j = self._job(jid)
+            if auto_resume_at:
+                j["auto_resume_at"] = auto_resume_at
             for c in j["chapters"]:
                 if c["status"] == "running":
                     c["status"] = "pending"

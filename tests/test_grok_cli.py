@@ -65,7 +65,7 @@ def test_translate_success_and_command(monkeypatch):
     cmd = seen[0]["cmd"]
     assert cmd[cmd.index("--tools") + 1] == "" and "--disable-web-search" in cmd and "--prompt-file" in cmd
     assert cmd[cmd.index("--output-format") + 1] == "json" and cmd[cmd.index("--effort") + 1] == "high"
-    assert json.loads(cmd[cmd.index("--json-schema") + 1])["required"]
+    assert "--json-schema" not in cmd and '"required"' in seen[0]["prompt"]     # schema in the prompt, not the flag
     assert "1920. 다크 문" in seen[0]["prompt"] and seen[0]["env"]["GROK_MEMORY"] == "0"
     assert "translate-tool-grok" in str(seen[0]["cwd"])
 
@@ -171,7 +171,7 @@ def _fake_translator(monkeypatch, replies):
 
     class Fake:
         def translate(self, *, heading, paragraphs, glossary_text, prev_tail, style, notes=""):
-            calls.append({"glossary": glossary_text, "tail": prev_tail, "style": style})
+            calls.append({"glossary": glossary_text, "tail": prev_tail, "style": style, "notes": notes})
             return ChapterResult(heading="13. Tiêu đề", paragraphs=replies[min(len(calls) - 1, len(replies) - 1)],
                                  new_terms=[{"source": "새로운", "target": "Mới Tinh"}], usage={"input_tokens": 10, "output_tokens": 5}, model="fake")
 
@@ -224,6 +224,17 @@ def test_retranslate_flags_new_term_conflict_with_previous_chapter(client, book,
     _fake_translator(monkeypatch, [["Đoạn một."] * 50])
     out = client.post(f"/api/projects/{pid}/chapters/13/retranslate", json={"model": "claude-opus-5-5"}).json()
     assert out["consistency"]["new_term_conflicts"] == [{"source": "새로운", "target": "Mới Tinh", "chapter": 12}]
+
+
+def test_retranslate_revises_current_translation(client, book, monkeypatch):
+    pid = _project(client, book, "rt-d.docx")
+    client.post(f"/api/projects/{pid}/chapters/13/load", json={})
+    calls = _fake_translator(monkeypatch, [["Đoạn đã sửa."] * 50])
+    out = client.post(f"/api/projects/{pid}/chapters/13/retranslate",
+                      json={"model": "claude-opus-5-5", "current": ["Bản cũ có lỗi.", " "], "parallel": 3}).json()
+    assert len(calls) == 1, "a reference that does not align paragraph-by-paragraph is sent whole, not split"
+    assert "CHẾ ĐỘ SỬA BẢN DỊCH" in calls[0]["style"] and "[BẢN DỊCH HIỆN CÓ" in calls[0]["notes"] and "Bản cũ có lỗi." in calls[0]["notes"]
+    assert out["consistency"]["revised"]
 
 
 # --- several grok.com accounts (GROK_CLI_HOMES) ------------------------------------------------
@@ -295,3 +306,17 @@ def test_status_reports_each_account(monkeypatch):
     st = grok_cli.status(probe=True, force=True)
     assert [(a["name"], a["logged_in"]) for a in st["accounts"]] == [("mặc định", True), ("acc2", False)]
     assert st["logged_in"] and st["models"] == ["grok-4.7"] and st["accounts"][1]["error"]
+
+
+def test_403_refusal_is_not_reported_as_a_login_problem(monkeypatch):
+    msg = '{"type":"error","message":"API error (status 403 Forbidden): permission-denied: I am sorry, I can' + "'" + 't help with that request."}'
+    fake_grok(monkeypatch, [(msg, "", 1)])
+    with pytest.raises(LLMRefused) as e:
+        translate(make_translator("grok-cli:default", "low"))
+    assert "chưa đăng nhập" not in e.value.message.lower() and "403" in e.value.message
+
+
+def test_parse_json_repairs_curly_quote_delimiter():
+    from app.ai.grok_cli import _parse_json
+    broken = '{"heading":"H","paragraphs":["‘Giết hộ thì hay.’”,"• • •","“Chào.”"],"new_terms":[]}'
+    assert _parse_json(broken)["paragraphs"] == ["‘Giết hộ thì hay.’", "• • •", "“Chào.”"]

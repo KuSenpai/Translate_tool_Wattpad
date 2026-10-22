@@ -248,7 +248,7 @@ function renderChapter(ch, { keepEditor = false } = {}) {
   S.chapter = ch;
   $("#titleInput").value = ch.title || "";
   setBadge($("#statusBadge"), ch.status);
-  $("#koPane").innerHTML = blocksHtml(ch.ko_blocks) || `<p class="muted">(Không có bản Hàn)</p>`;
+  if (!keepEditor || !S.koDirty) renderKo(ch);
   $("#koMeta").textContent = `${ch.ko_heading || ""} · ${ch.ko_blocks.length} đoạn`;
   if (!keepEditor) {
     ed().innerHTML = blocksHtml(ch.draft) || "<p><br></p>";
@@ -290,6 +290,12 @@ function renderChapter(ch, { keepEditor = false } = {}) {
   }
 }
 
+function renderKo(ch) {
+  S.koDirty = false;
+  $("#koPane").contentEditable = "false"; $("#koEditBtn").textContent = "✏ Sửa bản Hàn";
+  $("#koPane").innerHTML = blocksHtml(ch.ko_blocks) || (ch.ko_blocks.length ? "" : `<p class="muted">(Không có bản Hàn)</p>`);
+}
+
 async function loadChapter(n, koChoice = 0, viChoice = 0) {
   if (!S.project) return;
   if (S.dirty && S.chapter && S.chapter.number !== n && !confirm("Có thay đổi chưa lưu. Bỏ qua và mở chương khác?")) return;
@@ -306,8 +312,9 @@ const chUrl = (suffix = "") => `/api/projects/${S.project.id}/chapters/${S.chapt
 async function saveDraft({ quiet = false } = {}) {
   if (H.timer) snapshot();
   try {
-    const ch = await api("PUT", chUrl("/draft"), { blocks: editorToBlocks(ed()), title: $("#titleInput").value });
-    S.chapter = ch; setBadge($("#statusBadge"), ch.status); setDirty(false); renderIssues(ch.issues);
+    const ch = await api("PUT", chUrl("/draft"), { blocks: editorToBlocks(ed()), title: $("#titleInput").value,
+      ko_blocks: S.koDirty ? editorToBlocks($("#koPane")) : null });
+    S.chapter = ch; if (S.koDirty) renderKo(ch); setBadge($("#statusBadge"), ch.status); setDirty(false); renderIssues(ch.issues);
     $("#viMeta").textContent = `${ch.vi_heading || ""} · ${ch.draft.length} đoạn`;
     if (!quiet) toast("Đã lưu draft", "ok");
     return true;
@@ -315,12 +322,12 @@ async function saveDraft({ quiet = false } = {}) {
 }
 
 async function resetDraft() {
-  if (!confirm("Reset sẽ thay bản đang sửa bằng bản dịch gốc trong file Word. (Có thể Undo ngay sau đó.) Tiếp tục?")) return;
+  if (!confirm("Reset sẽ thay bản đang sửa (cả bản Hàn nếu đã sửa) bằng bản gốc trong file Word. (Có thể Undo ngay sau đó.) Tiếp tục?")) return;
   if (H.timer) snapshot();
   try {
     const ch = await api("POST", chUrl("/reset"));
     S.chapter = ch;
-    ed().innerHTML = blocksHtml(ch.draft) || "<p><br></p>"; snapshot();
+    ed().innerHTML = blocksHtml(ch.draft) || "<p><br></p>"; snapshot(); renderKo(ch);
     $("#titleInput").value = ch.title; setBadge($("#statusBadge"), ch.status); setDirty(false); renderIssues(ch.issues);
     toast("Đã reset về bản gốc trong Word", "ok");
   } catch (e) { fail(e); }
@@ -429,6 +436,7 @@ function consistencyHtml(r) {
   const ctx = (c.previous_chapters || []).length ? `đối chiếu chương ${c.previous_chapters.join(", ")}` : "chưa có chương trước để đối chiếu";
   return `<h5>Kiểm tra thuật ngữ</h5><div class="reason">${c.terms_in_chapter ? `✔ ${c.terms_ok}/${c.terms_in_chapter} thuật ngữ glossary khớp` : "Không có thuật ngữ glossary trong chương này"}
       · ${ctx}${c.hints_used ? ` · ${c.hints_used} gợi ý từ chương cũ` : ""}${c.examples_used ? ` · ${c.examples_used} câu xưng hô/thuật ngữ mẫu từ chương cũ` : ""}${c.retried ? " · đã tự dịch lại 1 lần để sửa lỗi" : ""}
+      ${(c.refused_paragraphs || []).length ? `<div style="color:#c07a00">⚠ ${c.refused_paragraphs.length} đoạn bị nhà cung cấp từ chối nên giữ tiếng Hàn, đánh dấu [CHƯA DỊCH]: ${c.refused_paragraphs.map((i) => `¶${i + 1}`).join(", ")} — dịch tay hoặc bằng model khác.</div>` : ""}
       ${li(warns, (i) => `<li class="muted">${i.block != null ? `¶${i.block + 1}: ` : ""}${esc(i.message)}</li>`)}
       ${li(c.terms_missing || [], (m) => `<li class="muted">Thiếu “${esc(m.target)}” (${esc(m.source)})</li>`)}
       ${li(c.new_term_conflicts || [], (m) => `<li style="color:#c07a00">Thuật ngữ mới “${esc(m.source)} → ${esc(m.target)}”: chương ${m.chapter} đã có từ này nhưng không dùng cách dịch đó — kiểm tra lại.</li>`)}</div>`;
@@ -450,6 +458,7 @@ async function retranslate() {
   try {
     const r = await api("POST", `/api/projects/${pid}/chapters/${number}/retranslate`, {
       model, effort: $("#rtEffort").value, instruction: $("#rtInstruction").value.trim(), auto_fix: $("#rtAutoFix").checked, parallel: +$("#rtParallel").value,
+      current: $("#rtRevise").checked ? blocksText(editorToBlocks(ed())) : null,
     });
     if (!S.chapter || S.chapter.number !== number || S.project.id !== pid) return;   // user moved to another chapter meanwhile
     S.retrans = r; r.elapsed = Math.round((Date.now() - t0) / 1000);
@@ -486,7 +495,7 @@ function renderRetransSummary() {
   const r = S.retrans; if (!r) return;
   const { mismatch, line } = retransStats(r);
   $("#rtResult").innerHTML = `<div class="suggest-box rt-summary">
-    <div class="rt-ok">✔ Đã dịch xong chương ${r.number}</div>
+    <div class="rt-ok">✔ Đã ${r.consistency?.revised ? "sửa" : "dịch"} xong chương ${r.number}</div>
     ${mismatch ? `<div class="alert error">Số đoạn lệch: Hàn ${r.paragraph_count.source} ≠ kết quả ${r.paragraph_count.result}.</div>` : ""}
     <div class="muted small">${line}</div>
     <label class="check"><input type="checkbox" class="rt-title-cb" ${S.rtWithTitle === false ? "" : "checked"}> Cập nhật cả tiêu đề</label>
@@ -924,6 +933,16 @@ function init() {
   document.addEventListener("keydown", (ev) => {
     if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "s" && !$("#viewEditor").classList.contains("hidden")) { ev.preventDefault(); saveDraft(); }
   });
+
+  const ko = $("#koPane");
+  $("#koEditBtn").addEventListener("click", () => {
+    const on = ko.contentEditable !== "true";
+    ko.contentEditable = on ? "true" : "false";
+    $("#koEditBtn").textContent = on ? "✔ Xong sửa Hàn" : "✏ Sửa bản Hàn";
+    if (on) ko.focus();
+  });
+  ko.addEventListener("input", () => { S.koDirty = true; setDirty(true); });
+  ko.addEventListener("paste", (ev) => { ev.preventDefault(); document.execCommand("insertText", false, ev.clipboardData.getData("text/plain")); });
 
   // proportional scroll sync between Korean and Vietnamese panes
   let syncing = false;

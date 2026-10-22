@@ -187,8 +187,10 @@ class ChapterService:
             "vi_options": content.vi_options, "confidence": content.confidence, "warnings": content.warnings,
             "ko_title": content.ko_title, "vi_title": content.vi_title,
             "ko_heading": content.ko_heading, "vi_heading": content.vi_heading,
-            "ko_blocks": _dump(content.ko_blocks), "original_vi": original, "source_hash": src_hash,
+            "ko_blocks": _dump(content.ko_blocks), "original_ko": _dump(content.ko_blocks), "original_vi": original, "source_hash": src_hash,
         })
+        if not fresh and "ko_edited" in rec:        # the user's fixed Korean text wins over the Word file until Reset
+            rec["ko_blocks"] = rec["ko_edited"]
         self.store.save_chapter(pid, number, rec)
         self.store.update_project(pid, last_chapter=number, last_opened_at=now_iso())
         rec = dict(rec, notices=notices)
@@ -203,10 +205,15 @@ class ChapterService:
                                              self.store.get_glossary(pid))
         return rec
 
-    def save_draft(self, pid: str, number: int, blocks: list[Block], title: Optional[str]) -> dict:
+    def save_draft(self, pid: str, number: int, blocks: list[Block], title: Optional[str],
+                   ko_blocks: Optional[list[Block]] = None) -> dict:
         rec = self._require(pid, number)
         new = _dump(blocks)
         new_title = (title or "").strip() or rec["title"]
+        if ko_blocks is not None and (ko := _dump(ko_blocks)) != rec.get("ko_blocks"):
+            rec["ko_blocks"] = rec["ko_edited"] = ko
+            transition(rec, "edit")
+            log.info("Korean text edited: project=%s chapter=%d blocks=%d", pid, number, len(ko))
         if new != rec["draft"] or new_title != rec["title"]:
             rec["draft"], rec["title"] = new, new_title
             transition(rec, "edit")
@@ -217,6 +224,8 @@ class ChapterService:
     def reset(self, pid: str, number: int) -> dict:
         rec = self._require(pid, number)
         rec["draft"] = rec["original_vi"]
+        if rec.pop("ko_edited", None) is not None:
+            rec["ko_blocks"] = rec.get("original_ko", rec["ko_blocks"])
         rec["title"] = default_title(number, rec.get("vi_title", ""))
         transition(rec, "edit")
         log.info("Draft reset to Word original: chapter=%d", number)

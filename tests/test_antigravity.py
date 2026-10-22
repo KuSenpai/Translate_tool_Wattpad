@@ -1,5 +1,7 @@
 """Antigravity (Gemini via `agy` headless): stream-json I/O, model choice, error mapping, corrective retry."""
 import json
+import subprocess
+import sys
 import time
 from types import SimpleNamespace
 
@@ -37,15 +39,23 @@ def fake_agy(monkeypatch, replies, seen=None):
         return SimpleNamespace(stdout=out, stderr=err, returncode=rc)
 
     monkeypatch.setenv("TRANSLATE_PROVIDER", "anthropic")
+    no_model_override(monkeypatch)
     monkeypatch.setattr(antigravity, "find_agy", lambda: "agy.exe")
     monkeypatch.setattr(antigravity.subprocess, "run", run)
+    monkeypatch.setattr(antigravity, "_run_agy", lambda cmd, stdin, cwd, timeout: run(cmd, input=stdin, cwd=cwd))
     antigravity._cache = (0.0, {})
+
+
+def no_model_override(monkeypatch):
+    for k in ("ANTIGRAVITY_MODEL_PRO", "ANTIGRAVITY_MODEL_FLASH"):    # the real .env may set them
+        monkeypatch.delenv(k, raising=False)
 
 
 GOOD = {"heading": "1920. Trăng Đen", "paragraphs": ["Kim Soo-hyun mỉm cười.", "Dòng hai."], "new_terms": []}
 
 
 def test_pick_model(monkeypatch):
+    no_model_override(monkeypatch)
     avail = antigravity._SLUG.findall(MODELS_OUT)
     assert pick_model("pro", avail) == "gemini-3.8-pro-high"
     assert pick_model("pro", avail, "low") == "gemini-3.8-pro-low" and pick_model("pro", avail, "medium") == "gemini-3.8-pro-high"
@@ -94,6 +104,40 @@ def test_corrective_retry_on_paragraph_mismatch(monkeypatch):
     assert len(r.paragraphs) == 2 and len(seen) == 2
     assert "Bạn trả về 1 đoạn nhưng đầu vào có 2 đoạn" in json.loads(seen[1]["input"])["message"]["content"]
     assert r.usage["input_tokens"] == 2000
+
+
+def test_fix_pass_is_one_short_call(monkeypatch):
+    seen = []
+    merged = dict(GOOD, paragraphs=["Kim Soo-hyun mỉm cười. Dòng hai."])
+    fake_agy(monkeypatch, [(result_line(structured_output=merged), "", 0)], seen)
+    t = make_translator("antigravity:pro", "medium")
+    t.max_attempts, t.timeout_min = 1, 8                                  # what retranslate sets for its corrective pass
+    t.translate(heading="1920. 다크 문", paragraphs=["김수현은 웃었다.", "둘째 줄."], glossary_text="", prev_tail=[], style="")
+    cmd = seen[0]["cmd"]
+    assert len(seen) == 1 and cmd[cmd.index("--print-timeout") + 1] == "8m"
+
+
+def test_run_agy_returns_at_result_even_if_agy_hangs(tmp_path):
+    result = json.dumps({"event": "result", "result": {"status": "SUCCESS"}})
+    hang = f"import sys,time; sys.stdin.read(); print({result!r}, flush=True); time.sleep(60)"   # result printed, never exits
+    t = time.time()
+    out = antigravity._run_agy([sys.executable, "-c", hang], "x" * 200000, tmp_path, timeout=30)
+    assert time.time() - t < 15 and antigravity._result_event(out.stdout)["status"] == "SUCCESS"
+    with pytest.raises(subprocess.TimeoutExpired):
+        antigravity._run_agy([sys.executable, "-c", "import time; time.sleep(60)"], "", tmp_path, timeout=1)
+
+
+def test_interrupted_stream_is_asked_again_once(monkeypatch):
+    cut = result_line(status="ERROR", error="The stream was interrupted. Please continue the task you were working on.",
+                      response='{"heading": "Chương 1", "paragraphs": ["nửa')
+    seen = []
+    fake_agy(monkeypatch, [(cut, "", 1), (result_line(structured_output=GOOD), "", 0)], seen)
+    data, _, _ = AntigravityJSON("antigravity:pro").call(system="s", user="u", schema=SCHEMA)
+    assert data == GOOD and len(seen) == 2
+    fake_agy(monkeypatch, [(cut, "", 1), (cut, "", 1)])                     # twice in a row: reported, not looped
+    with pytest.raises(Exception) as e:
+        AntigravityJSON("antigravity:pro").call(system="s", user="u", schema=SCHEMA)
+    assert e.value.code == "ANTIGRAVITY_ERROR"
 
 
 @pytest.mark.parametrize("out,err,rc,exc,code", [

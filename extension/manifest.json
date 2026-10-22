@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
-  "name": "Novel Translator – Wattpad Helper",
-  "version": "1.3.0",
-  "description": "Đăng chương từ Novel Translator (chạy trên máy bạn) lên Wattpad bằng chính trình duyệt đã đăng nhập của bạn.",
+  "name": "Novel Translator – Wattpad & Novelpia Helper",
+  "version": "1.4.0",
+  "description": "Đăng chương từ Novel Translator (chạy trên máy bạn) lên Wattpad, và gửi chương Novelpia bạn đang đọc về tool — bằng chính trình duyệt đã đăng nhập của bạn.",
   "permissions": ["storage"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
   "background": { "service_worker": "background.js" },
   "content_scripts": [
     { "matches": ["https://www.wattpad.com/*"], "js": ["page_hook.js"], "run_at": "document_start", "world": "MAIN" },
-    { "matches": ["https://www.wattpad.com/*"], "js": ["content.js"], "run_at": "document_idle" }
+    { "matches": ["https://www.wattpad.com/*"], "js": ["content.js"], "run_at": "document_idle" },
+    { "matches": ["https://novelpia.com/viewer/*"], "js": ["novelpia.js"], "run_at": "document_idle" }
   ],
-  "action": { "default_popup": "popup.html", "default_title": "Novel Translator – Wattpad Helper" }
+  "action": { "default_popup": "popup.html", "default_title": "Novel Translator – Wattpad & Novelpia Helper" }
 }

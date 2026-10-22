@@ -1,6 +1,7 @@
 """HTTP API. Thin layer: validation + delegation to services."""
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Optional
@@ -40,6 +41,7 @@ class LoadReq(BaseModel):
 class DraftReq(BaseModel):
     blocks: list[Block]
     title: Optional[str] = None
+    ko_blocks: Optional[list[Block]] = None     # the Korean text, only when the user edited it
 
 
 class AddChapterReq(BaseModel):
@@ -101,7 +103,7 @@ def get_chapter(pid: str, number: int):
 
 @router.put("/projects/{pid}/chapters/{number}/draft")
 def save_draft(pid: str, number: int, req: DraftReq):
-    return service.save_draft(pid, number, req.blocks, req.title)
+    return service.save_draft(pid, number, req.blocks, req.title, req.ko_blocks)
 
 
 @router.post("/projects/{pid}/chapters/{number}/reset")
@@ -232,6 +234,7 @@ class RetranslateReq(BaseModel):
     instruction: str = Field("", max_length=1000)
     auto_fix: bool = True
     parallel: int = Field(1, ge=1, le=4)
+    current: list[str] | None = Field(None, max_length=5000)   # Vietnamese paragraphs to revise instead of re-translating
 
 
 @router.post("/projects/{pid}/chapters/{number}/retranslate")
@@ -239,7 +242,7 @@ def retranslate(pid: str, number: int, req: RetranslateReq):
     """Translate the whole chapter again from the Korean source. Returns the result only — the UI applies it."""
     from .ai.retranslate import retranslate_chapter
     return retranslate_chapter(pid, number, model=req.model, effort=req.effort, instruction=req.instruction,
-                                auto_fix=req.auto_fix, parallel=req.parallel)
+                                auto_fix=req.auto_fix, parallel=req.parallel, current=req.current)
 
 
 # --- Wattpad ------------------------------------------------------------------
@@ -412,6 +415,31 @@ def ext_stories(req: ExtStories):
 @ext.post("/diag")
 def ext_diag(diag: dict):
     return {"path": publish_service.publisher.bridge.save_diag(diag)}
+
+
+class ExtNovelpia(BaseModel):
+    novel_no: str = Field(pattern=r"^\d{1,12}$")
+    content_no: str = Field(pattern=r"^\d{1,12}$")
+    novel_title: str = Field("", max_length=300)
+    number: int = Field(0, ge=0, le=9999)  # "EP.12" -> 12; Prologue / 외전 -> 0
+    title: str = Field("", max_length=300)
+    text: str = Field(min_length=1, max_length=500_000)
+
+
+@ext.post("/novelpia")
+def ext_novelpia(req: ExtNovelpia):
+    """Saves one chapter read by the extension from the user's own logged-in Novelpia tab, then rebuilds
+    `<novel>.txt` ("제N화 title" headings) so it can be opened in the Translate tab like any raw file."""
+    from .storage.project_state import slugify
+    d = config.DATA_DIR / "novelpia" / req.novel_no
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{req.content_no}.json").write_text(json.dumps(req.model_dump(), ensure_ascii=False), encoding="utf-8")
+    eps = sorted((json.loads(f.read_text(encoding="utf-8")) for f in d.glob("*.json")),
+                 key=lambda e: (e["number"], int(e["content_no"])))
+    out = d / f"{slugify(req.novel_title or req.novel_no)}.txt"
+    out.write_text("\n\n".join(f"제{e['number']}화 {e['title']}".strip() + "\n\n" + e["text"] for e in eps) + "\n",
+                   encoding="utf-8")
+    return {"path": str(out), "chapters": len(eps), "number": req.number}
 
 
 # --- glossary -----------------------------------------------------------------

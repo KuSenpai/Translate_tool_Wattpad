@@ -130,3 +130,20 @@ def test_add_missing_chapter(client, book):
     idx = add(16, vi_text="Chỉ có bản Việt.").json()
     assert idx["missing"] == [] and not any("Thiếu" in w for w in idx["warnings"])
     assert idx["project"]["chapter_range"] == [10, 17]
+
+
+def test_edit_korean_text_survives_reload_until_reset(client, book):
+    r = client.post("/api/projects/upload", files={"file": ("ko-edit.docx", book.read_bytes(),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    pid = r.json()["project"]["id"]
+    ch = client.post(f"/api/projects/{pid}/chapters/12/load", json={}).json()
+    word_ko = ch["ko_blocks"]
+    fixed = [{"type": "paragraph", "runs": [{"text": "고친 한국어 문장."}]}]
+    out = client.put(f"/api/projects/{pid}/chapters/12/draft", json={"blocks": ch["draft"], "ko_blocks": fixed}).json()
+    assert out["ko_blocks"][0]["runs"][0]["text"] == "고친 한국어 문장." and out["status"] == "EDITING"
+    again = client.post(f"/api/projects/{pid}/chapters/12/load", json={}).json()
+    assert again["ko_blocks"][0]["runs"][0]["text"] == "고친 한국어 문장.", "re-opening must not bring back the Word Korean"
+    client.put(f"/api/projects/{pid}/chapters/12/draft", json={"blocks": ch["draft"]})     # saving without ko_blocks keeps the edit
+    assert client.get(f"/api/projects/{pid}/chapters/12").json()["ko_blocks"][0]["runs"][0]["text"] == "고친 한국어 문장."
+    assert client.post(f"/api/projects/{pid}/chapters/12/reset").json()["ko_blocks"] == word_ko
+    assert client.post(f"/api/projects/{pid}/chapters/12/load", json={}).json()["ko_blocks"] == word_ko

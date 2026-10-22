@@ -216,6 +216,32 @@ def test_publish_fills_the_empty_latest_draft(env, client, book, fake):
     assert client.get(f"/api/projects/{pid}/chapters/11").json()["publish_history"][-1]["part_id"] == blank
 
 
+def test_title_reaches_wattpads_own_model(env, client, book, fake):
+    """Wattpad keeps the title in its own model (key/blur events), so text that only sits in the page used to be
+    saved and published as "Untitled Part N"."""
+    page = env["page"]
+    fake.title_model = True
+    blank = fake.add_blank_draft("222")
+    pid = ready(client, book, 11, "ext-title-model.docx")
+    job = publish_one(client, pid, 11, "222", "Chương 11: Tiêu đề thật")
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page)
+    assert j["state"] == "done", j
+    assert fake.old[blank]["published"] and fake.old[blank]["title"] == "Chương 11: Tiêu đề thật"
+
+
+def test_title_not_saved_stops_before_publish(env, client, book, fake):
+    page = env["page"]
+    fake.title_locked = True
+    blank = fake.add_blank_draft("222")
+    pid = ready(client, book, 11, "ext-title-locked.docx")
+    job = publish_one(client, pid, 11, "222", "Chương 11")
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page)
+    assert j["state"] == "error" and j["error_code"] == "WATTPAD_TITLE_NOT_SAVED" and "Untitled Part" in j["message"], j
+    assert not fake.old[blank]["published"]                   # never published under the wrong title
+
+
 def test_latest_draft_with_text_is_never_overwritten(env, client, book, fake):
     page = env["page"]
     fake.existing_part("333")

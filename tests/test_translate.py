@@ -159,3 +159,26 @@ def test_anthropic_request_shape(monkeypatch):
     with pytest.raises(LLMRefused):
         tr.translate(heading="h", paragraphs=["x"], glossary_text="", prev_tail=[], style="")
     assert MODELS["claude-haiku-4-5"]["effort"] is False             # effort is rejected on Haiku 4.5
+
+
+def test_join_wrapped_glues_hard_wrapped_lines():
+    from app.ai.novel_translator import join_wrapped
+    long = "가" * 64
+    assert join_wrapped([long, "으로 보낼 확률은 높았다.", "다음 문장."]) == [long + " 으로 보낼 확률은 높았다.", "다음 문장."]
+    assert join_wrapped([long + ".", "새 문단."]) == [long + ".", "새 문단."]      # sentence ended
+    assert join_wrapped([long, "“대사.”"]) == [long, "“대사.”"]                    # next opens a quote
+    assert join_wrapped(["짧은 제목", "본문."]) == ["짧은 제목", "본문."]          # short line = real paragraph
+
+
+def test_avoid_check_has_no_false_positives():
+    from app.document.models import Block
+    from app.editor.validation import validate_translation
+    vi = lambda t: [Block.model_validate({"type": "paragraph", "runs": [{"text": t}]})]
+    g = [{"source": "로스앤젤레스", "target": "Los Angeles", "avoid": ["LA"]},
+         {"source": "무한", "target": "Vô hạn", "avoid": ["Vô Hạn"]},
+         {"source": "윈드 커터", "target": "Lưỡi Gió (Wind Cutter)", "avoid": ["Lưỡi Gió"]}]
+    hard = lambda t: [i for i in validate_translation(vi(t), [], g) if i["level"] == "warn"]
+    assert not hard("Hắn lại làm vậy ở Los Angeles. Vô hạn. Lưỡi Gió (Wind Cutter) bay tới.")
+    assert len(hard("Hắn tới LA.")) == 1
+    assert len(hard("Sức mạnh Vô Hạn.")) == 1
+    assert len(hard("Tung Lưỡi Gió.")) == 1

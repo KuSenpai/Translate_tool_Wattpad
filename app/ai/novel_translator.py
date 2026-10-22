@@ -118,7 +118,25 @@ def split_source(blocks: list[Block]) -> tuple[list[SourceChapter], list[str]]:
 
 def chapter_paragraphs(blocks: list[Block], ch: SourceChapter) -> list[str]:
     """Non-empty paragraphs sent for translation (empty spacer lines are not)."""
-    return [blocks[j].text.strip() for j in range(ch.start, ch.end) if blocks[j].text.strip()]
+    return join_wrapped([blocks[j].text.strip() for j in range(ch.start, ch.end) if blocks[j].text.strip()])
+
+
+WRAP_MIN = 60            # some source files are hard-wrapped every ~65 characters, even mid-word
+_SENTENCE_END = re.compile(r"[.!?…\"”’'』」\]】)>~:;*•▶=\-]$")
+_OPENS_LINE = re.compile(r"^[\"“‘'『「\[【(<※▶•*=\-]")
+
+
+def join_wrapped(paragraphs: list[str]) -> list[str]:
+    """Glue back paragraphs that a hard wrap cut mid-sentence: a long line with no sentence-ending punctuation, followed
+    by a line that does not open something new (quote, bracket, bullet). Otherwise the model translates each piece as its
+    own paragraph and the Vietnamese breaks mid-sentence."""
+    out: list[str] = []
+    for p in paragraphs:
+        if out and len(out[-1]) >= WRAP_MIN and not _SENTENCE_END.search(out[-1]) and not _OPENS_LINE.search(p):
+            out[-1] += " " + p      # ponytail: the wrap dropped the space or cut a word — can't tell which, the model reads both
+        else:
+            out.append(p)
+    return out
 
 
 # --------------------------------------------------------------------------- models & prices
@@ -128,8 +146,8 @@ MODELS = {
     "claude-sonnet-5-5": {"label": "Claude Sonnet 5.5 — rẻ hơn ~2 lần", "price": (2.0, 10.0, 0.20), "effort": True, "fallbacks": True},
     "claude-haiku-4-5": {"label": "Claude Haiku 4.5 — rẻ nhất, chất lượng thấp hơn", "price": (1.0, 5.0, 0.10), "effort": False, "fallbacks": False},
     # Through the local Claude Code CLI: counted against the user's Claude subscription, not billed per token.
-    "claude-code:opus": {"label": "Claude Code · Opus — dùng gói Claude của bạn (không tính tiền API)", "price": (0.0, 0.0, 0.0),
-                         "effort": True, "fallbacks": False, "subscription": True, "provider": "claude_code", "alias": "opus"},
+    "claude-code:opus": {"label": "Claude Code · Opus 5.5 — dùng gói Claude của bạn (không tính tiền API)", "price": (0.0, 0.0, 0.0),
+                         "effort": True, "fallbacks": False, "subscription": True, "provider": "claude_code", "alias": "claude-opus-5-5"},
     "claude-code:sonnet": {"label": "Claude Code · Sonnet — dùng gói Claude, tốn ít lượt hơn Opus", "price": (0.0, 0.0, 0.0),
                            "effort": True, "fallbacks": False, "subscription": True, "provider": "claude_code", "alias": "sonnet"},
     # Through the Antigravity CLI (`agy`): Gemini, counted against the quota of the Google account signed in to Antigravity.

@@ -1,11 +1,12 @@
 """App entry point:  python -m app.main"""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import config
@@ -46,12 +47,26 @@ async def _unexpected(_: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"error": {"code": "INTERNAL", "message": f"Lỗi không mong muốn: {exc}"}})
 
 
+@app.middleware("http")
+async def _no_stale_ui(request: Request, call_next):
+    """The browser must revalidate the UI files, or an old app.js keeps running after the tool is updated."""
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    """index.html with ?v=<mtime> on the scripts and styles: a browser that cached an old app.js (Edge does, hours long)
+    is forced to fetch the new one after the tool is updated."""
+    v = int(max(p.stat().st_mtime for p in STATIC.iterdir()))
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    html = re.sub(r'(src|href)="(/static/[^"?]+\.(?:js|css))"', rf'\1="\2?v={v}"', html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 def run() -> None:

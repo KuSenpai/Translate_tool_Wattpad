@@ -35,6 +35,7 @@ SYSTEM_OVERRIDE = ("You are a professional literary translator working inside a 
                    "never browse, never ask questions. Answer immediately with the JSON object requested in the message.")
 _LOGIN = re.compile(r"not (?:logged|signed) in|sign[ -]?in|log[ -]?in|unauthori[sz]ed|unauthenticated|authenticat|"
                     r"credential|\b401\b|\b403\b|invalid (?:api )?key", re.IGNORECASE)
+_REFUSED = re.compile(r"can'?t (?:help|assist)|cannot (?:help|assist)|unable to (?:help|assist)|content (?:policy|moderation|filter)", re.IGNORECASE)
 _QUOTA = re.compile(r"usage limit|limit (?:reached|exceeded)|quota|out of credits|credits? (?:exhausted|used up)|"
                     r"exceeded your|spending limit|subscription", re.IGNORECASE)
 _RATE = re.compile(r"\b429\b|\b50[0-4]\b|rate[ -]?limit|overloaded|unavailable|try again|timed? ?out", re.IGNORECASE)
@@ -175,9 +176,10 @@ class GrokCLIJSON:
                                "rồi chạy  grok  một lần để đăng nhập.", code="GROK_CLI_MISSING")
         self.slug = pick_model()
 
-    def _cmd(self, prompt_file: Path, schema: dict) -> list[str]:
-        cmd = [self.exe, "--prompt-file", str(prompt_file), "--json-schema", json.dumps(schema, ensure_ascii=False),
-               "--output-format", "json", "--cwd", str(_workdir()), "--tools", "", "--disable-web-search",
+    def _cmd(self, prompt_file: Path) -> list[str]:
+        # No --json-schema: with it the CLI sometimes never returns (same prompt: >2×10 min hung vs 3 min without).
+        # The schema goes into the prompt instead and the answer is parsed from the text.
+        cmd = [self.exe, "--prompt-file", str(prompt_file), "--output-format", "json", "--cwd", str(_workdir()), "--tools", "", "--disable-web-search",
                "--no-subagents", "--no-plan", "--max-turns", "3", "--no-auto-update",
                "--system-prompt-override", SYSTEM_OVERRIDE]
         if self.slug:
@@ -226,14 +228,17 @@ class GrokCLIJSON:
                    refusal_message: str = "Grok từ chối xử lý nội dung này") -> tuple[dict, dict, str]:
         wd = _workdir()
         prompt_file = wd / f"prompt_{uuid.uuid4().hex[:10]}.txt"
-        prompt_file.write_text(f"{system.strip()}\n\n---\n\n{user.strip()}" if system.strip() else user, encoding="utf-8")
+        prompt = f"{system.strip()}\n\n---\n\n{user.strip()}" if system.strip() else user
+        prompt += ("\n\n---\n\nReply with ONLY one JSON object (no markdown, no commentary) matching this JSON Schema:\n"
+                   + json.dumps(schema, ensure_ascii=False))
+        prompt_file.write_text(prompt, encoding="utf-8")
         log.info("grok cli call started (account=%s, effort=%s, prompt %d chars) — a long chapter takes several minutes",
                  acc["name"], self.effort or "default", prompt_file.stat().st_size)
         try:
             # A healthy call takes 1–6 min; a hung stream sits idle forever, so cut it at 10 min and retry once.
             for attempt in (1, 2):
                 try:
-                    out = subprocess.run(self._cmd(prompt_file, schema), capture_output=True, text=True, encoding="utf-8",
+                    out = subprocess.run(self._cmd(prompt_file), capture_output=True, text=True, encoding="utf-8",
                                          errors="replace", timeout=600, cwd=wd, env=_env(acc["home"]))
                     break
                 except subprocess.TimeoutExpired:
@@ -253,13 +258,17 @@ class GrokCLIJSON:
         if stop == "refusal":
             from .novel_translator import LLMRefused
             raise LLMRefused(f"{refusal_message}.", details={"usage": usage})
+        if stop == "cancelled" and not res.get("structuredOutput"):   # xAI moderation cuts the stream mid-answer
+            from .novel_translator import LLMRefused
+            raise LLMRefused(f"{refusal_message} — xAI ngắt giữa chừng (bộ lọc nội dung). "
+                             "Bật dịch theo phần để tự chia nhỏ, hoặc dịch chương này bằng model khác.", details={"usage": usage})
         if stop == "max_tokens":
             raise LLMEmptyResponse("Kết quả bị cắt (quá dài cho một lần gọi).", details={"usage": usage})
         data = res.get("structuredOutput") or res.get("structured_output")
         if isinstance(data, str):
             data = _parse_json(data)
         if not isinstance(data, dict):
-            data = _parse_json(str(res.get("text") or ""))
+            data = _parse_json(str(res.get("text") or res.get("result") or ""))
         if not isinstance(data, dict):
             log.warning("grok cli bad JSON (stop=%s, keys=%s): %.800s", stop, list(res), out.stdout)
             raise LLMEmptyResponse("Grok trả về dữ liệu không đúng định dạng JSON.", details={"usage": usage})
@@ -288,9 +297,15 @@ def _json_object(stdout: str) -> Optional[dict]:
     return None
 
 
+# Without --json-schema the model now and then closes a JSON string with a typographic quote: `…hay.’”,"next"`.
+# An unescaped `”,"` / `”]` / `”}` can't occur inside a valid JSON string, so it can only be a broken delimiter.
+_CURLY_DELIM = re.compile(r'[”“](?=\s*(?:,\s*"|\]|\}))')
+
+
 def _parse_json(text: str):
     cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip())
-    for candidate in (cleaned, (m.group(0) if (m := re.search(r"\{.*\}", cleaned, re.S)) else "")):
+    whole = m.group(0) if (m := re.search(r"\{.*\}", cleaned, re.S)) else ""
+    for candidate in (cleaned, whole, _CURLY_DELIM.sub('"', whole)):
         try:
             return json.loads(candidate)
         except (json.JSONDecodeError, TypeError):
@@ -310,6 +325,10 @@ def _map_error(text: str, returncode: int, usage: dict, refusal_message: str) ->
     if _BAD_MODEL.search(text):
         return LLMError(f"Model Grok CLI không hợp lệ: {short}. Xem danh sách bằng  grok models  và đặt GROK_CLI_MODEL trong .env.",
                         code="AI_BAD_MODEL")
+    if _REFUSED.search(text):       # before the login check: a refusal also arrives as "403 permission-denied"
+        from .novel_translator import LLMRefused
+        return LLMRefused(f"{refusal_message} — xAI từ chối nội dung này (403: “I can't help with that request”). "
+                          "Thử chia nhỏ chương hoặc dịch phần đó bằng model khác.", details={"usage": usage})
     if _QUOTA.search(text):
         return LLMUsageLimit(f"Đã hết hạn mức Grok: {short}")
     if _LOGIN.search(text):

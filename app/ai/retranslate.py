@@ -22,9 +22,10 @@ from ..editor.validation import validate_translation
 from ..errors import AppError, ChapterError
 from ..logging_setup import get_logger
 from ..storage.project_state import store
-from .chunked import translate_parallel
+from .chunked import REFUSED_MARK, translate_parallel
 from .consistency import with_examples
-from .novel_translator import MODELS, cost_usd, make_translator
+from .llm_service import LLMError
+from .novel_translator import MODELS, cost_usd, join_wrapped, make_translator
 from .termbase import scanner
 from .translation_jobs import get_style
 
@@ -118,13 +119,15 @@ def _new_term_conflicts(new_terms: list[dict], known: set[str], previous: list[d
 
 
 def retranslate_chapter(pid: str, number: int, *, model: str, effort: str = "medium", instruction: str = "",
-                        auto_fix: bool = True, parallel: int = 1) -> dict:
+                        auto_fix: bool = True, parallel: int = 1, current: list[str] | None = None) -> dict:
+    """current: the Vietnamese text being edited — when given, the AI revises it (fixes mistakes, keeps what is right)
+    instead of translating the chapter again from scratch."""
     rec = store.get_chapter(pid, number)
     if rec is None:
         raise ChapterError(f"Chương {number} chưa được load.", code="CHAPTER_NOT_LOADED")
     if model not in MODELS:
         raise ChapterError(f"Model '{model}' không có trong danh sách.", code="AI_BAD_MODEL")
-    paragraphs = _paragraphs(rec.get("ko_blocks", []))
+    paragraphs = join_wrapped(_paragraphs(rec.get("ko_blocks", [])))
     if not paragraphs:
         raise ChapterError("Chương này không có bản Hàn để dịch lại.", code="NO_SOURCE")
     heading = (rec.get("ko_heading") or rec.get("ko_title") or f"{number}").strip()
@@ -138,15 +141,20 @@ def retranslate_chapter(pid: str, number: int, *, model: str, effort: str = "med
     style = get_style()
     if instruction.strip():
         style += f"\n- Yêu cầu riêng cho lần dịch lại chương này (ưu tiên cao): {instruction.strip()}"
+    current = [p.strip() for p in current or [] if p.strip()]
+    if current:
+        style += ("\n- CHẾ ĐỘ SỬA BẢN DỊCH: trong story_notes có [BẢN DỊCH HIỆN CÓ] của chương. Đối chiếu với bản Hàn và giữ nguyên"
+                  " câu chữ đã đúng; chỉ sửa chỗ dịch sai nghĩa, sót ý, sai thuật ngữ glossary, sai xưng hô, sai chính tả, câu lủng củng."
+                  " Không viết lại những câu không có lỗi. Vẫn trả đúng một đoạn tiếng Việt cho mỗi đoạn Hàn.")
 
-    log.info("Re-translating chapter %d with %s (%d paragraphs, %d glossary entries, %d previous chapters)",
-             number, model, len(paragraphs), len(entries), len(previous))
+    log.info("%s chapter %d with %s (%d paragraphs, %d glossary entries, %d previous chapters)",
+             "Revising" if current else "Re-translating", number, model, len(paragraphs), len(entries), len(previous))
     translator = make_translator(model, effort)
     translator.count_tolerance = 0.05      # the user reviews the preview: a few merged paragraphs are not worth another 3 minutes
 
     def attempt(extra: str):
         r = translate_parallel(translator, heading=heading, paragraphs=paragraphs, glossary_text=glossary_text, prev_tail=tail,
-                               style=style + extra, notes=notes, parts=parallel)
+                               style=style + extra, notes=notes, parts=parallel, reference=current)
         return r, _check(rec, r.paragraphs, glossary_all)
 
     result, issues = attempt("")
@@ -154,18 +162,24 @@ def retranslate_chapter(pid: str, number: int, *, model: str, effort: str = "med
     retried = False
     if auto_fix and _hard(issues):   # forbidden renderings / Hangul / junk: one corrective pass with the problems spelled out
         translator.max_attempts = 1          # …without the translator's own paragraph-count retry on top (calls multiply)
+        translator.timeout_min = 8           # Antigravity: a stuck fix pass gives up after 8 min, not 20 (first result is kept)
         problems = "; ".join(dict.fromkeys(i["message"] for i in _hard(issues)))[:900]
         retried = True
-        second, issues2 = attempt("\n- LỖI Ở LẦN DỊCH TRƯỚC, bắt buộc sửa lần này: " + problems)
-        for k, v in second.usage.items():
-            usage[k] = usage.get(k, 0) + v
-        if len(_hard(issues2)) <= len(_hard(issues)):
-            result, issues = second, issues2
+        try:
+            second, issues2 = attempt("\n- LỖI Ở LẦN DỊCH TRƯỚC, bắt buộc sửa lần này: " + problems)
+        except LLMError as e:          # the fix pass failing (refused, cut off, timeout) must not throw away the first result
+            log.warning("Corrective pass failed (%s) — keeping the first translation", e.message[:120])
+        else:
+            for k, v in second.usage.items():
+                usage[k] = usage.get(k, 0) + v
+            if len(_hard(issues2)) <= len(_hard(issues)):
+                result, issues = second, issues2
 
     vi_text = "\n".join(result.paragraphs)
     known = {e["source"] for e in glossary_all}
     report = {**_term_report(entries, korean, vi_text), "hints_used": hints, "examples_used": examples, "previous_chapters": [c["number"] for c in previous],
-              "retried": retried, "parallel_parts": parallel, "new_term_conflicts": _new_term_conflicts(result.new_terms, known, previous)}
+              "retried": retried, "parallel_parts": parallel, "revised": bool(current),
+              "refused_paragraphs": [i for i, p in enumerate(result.paragraphs) if p.startswith(REFUSED_MARK)], "new_term_conflicts": _new_term_conflicts(result.new_terms, known, previous)}
     vi_title = _TITLE_PREFIX.sub("", result.heading or "").strip()
     return {
         "number": number,

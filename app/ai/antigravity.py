@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -43,6 +44,7 @@ _RATE = re.compile(r"\b429\b|\b503\b|rate[ -]?limit|overloaded|unavailable|try a
 _SAFETY = re.compile(r"safety|prohibited[_ ]content|blocked|recitation|blocklist|harm[_ ]category|policy", re.IGNORECASE)
 _BAD_MODEL = re.compile(r"unknown model|model .*not (?:found|available|supported)|invalid model", re.IGNORECASE)
 _SLUG = re.compile(r"\b((?:gemini|claude|gpt)-[a-z0-9.\-]*\d[a-z0-9.\-]*)", re.IGNORECASE)
+_INTERRUPTED = re.compile(r"stream was interrupted|connection (?:reset|closed)|unexpected eof", re.IGNORECASE)
 _EFFORT_SUFFIX = re.compile(r"-(high|medium|low)$")
 _HANGUL = re.compile(r"[가-힣]")
 
@@ -142,6 +144,7 @@ def pick_model(tier: str, available: list[str], effort: str = "high") -> Optiona
 class AntigravityJSON:
     """Same interface as novel_translator.ClaudeJSON.call(), backed by `agy` headless (stream-json on stdin,
     so a long chapter never hits the Windows command-line length limit)."""
+    timeout_min = 20
 
     def __init__(self, model: str, effort: str = "medium"):
         from .novel_translator import MODELS
@@ -156,7 +159,7 @@ class AntigravityJSON:
 
     def _cmd(self, schema_path: Path) -> list[str]:
         cmd = [self.exe, "--input-format", "stream-json", "--output-format", "stream-json",
-               "--json-schema", str(schema_path), "--print-timeout", "20m", "--sandbox"]
+               "--json-schema", str(schema_path), "--print-timeout", f"{self.timeout_min}m", "--sandbox"]
         if self.slug:
             cmd += ["--model", self.slug]
         if self.effort and not (self.slug and _EFFORT_SUFFIX.search(self.slug)):   # the slug already fixes the effort
@@ -171,14 +174,20 @@ class AntigravityJSON:
             schema_path.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
         prompt = f"{system.strip()}\n\n---\n\n{user.strip()}" if system.strip() else user
         line = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
-        try:
-            out = subprocess.run(self._cmd(schema_path), input=line, capture_output=True, text=True, encoding="utf-8",
-                                 errors="replace", timeout=1320, cwd=wd)
-        except subprocess.TimeoutExpired:
-            raise LLMTimeout("Antigravity không trả kết quả sau 20 phút.")
-        except OSError as e:
-            raise LLMError(f"Không chạy được Antigravity CLI: {e}", code="ANTIGRAVITY_MISSING")
-        res = _result_event(out.stdout)
+        for attempt in range(2):
+            try:
+                out = _run_agy(self._cmd(schema_path), line, wd, self.timeout_min * 60 + 120)
+            except subprocess.TimeoutExpired as e:
+                tail = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+                log.warning("agy timeout after %d min, last output: %s", self.timeout_min, tail[-1500:].replace("\n", " | "))
+                raise LLMTimeout(f"Antigravity không trả kết quả sau {self.timeout_min} phút.")
+            except OSError as e:
+                raise LLMError(f"Không chạy được Antigravity CLI: {e}", code="ANTIGRAVITY_MISSING")
+            res = _result_event(out.stdout)
+            if attempt == 0 and res and _INTERRUPTED.search(json.dumps(res.get("error"), ensure_ascii=False)):
+                log.warning("agy stream interrupted mid-answer — asking again once")   # a dropped connection, not the text
+                continue
+            break
         u = (res or {}).get("usage") or {}
         usage = {"input_tokens": u.get("input_tokens", 0) or 0,
                  "output_tokens": (u.get("output_tokens", 0) or 0) + (u.get("thinking_tokens", 0) or 0),
@@ -200,6 +209,38 @@ class AntigravityJSON:
         model_used = f"antigravity:{self.slug or 'default'}"
         log.info("agy ok: model=%s in=%s out=%s", model_used, usage["input_tokens"], usage["output_tokens"])
         return data, usage, model_used
+
+
+def _run_agy(cmd: list[str], stdin: str, cwd: Path, timeout: float):
+    """Like subprocess.run(capture_output=True), but returns as soon as the result event is printed: `agy` sometimes
+    prints its result and then never exits, which used to hold a finished chapter until the timeout threw it away."""
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         encoding="utf-8", errors="replace", cwd=cwd)
+    timed_out = threading.Event()
+    timer = threading.Timer(timeout, lambda: (timed_out.set(), p.kill()))
+
+    def feed():      # in a thread: a big prompt must not deadlock against agy's own output
+        try:
+            p.stdin.write(stdin)
+            p.stdin.close()
+        except OSError:
+            pass
+    lines: list[str] = []
+    timer.start()
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        for raw in p.stdout:
+            lines.append(raw)
+            if _result_event(raw) is not None:
+                break
+    finally:
+        timer.cancel()
+        if p.poll() is None:
+            p.kill()
+        p.wait()
+    if timed_out.is_set():
+        raise subprocess.TimeoutExpired(cmd, timeout, output="".join(lines))
+    return subprocess.CompletedProcess(cmd, p.returncode, "".join(lines), "")
 
 
 def _result_event(stdout: str) -> Optional[dict]:
@@ -290,7 +331,7 @@ class AntigravityTranslator(AntigravityJSON):
         system = rules(style)
         total: dict = {}
         best, fix = None, ""
-        for attempt in range(2):   # Gemini sometimes merges paragraphs or leaves Hangul: one corrective retry
+        for attempt in range(getattr(self, "max_attempts", 2)):   # Gemini sometimes merges paragraphs or leaves Hangul: one corrective retry
             data, usage, model = self.call(system=system, user=build_message(heading, paragraphs, glossary_text, prev_tail, notes, fix),
                                            schema=SCHEMA, refusal_message="Gemini từ chối dịch chương này")
             for k, v in usage.items():

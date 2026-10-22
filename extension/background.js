@@ -1,4 +1,4 @@
-// Relays messages between the Wattpad page (content.js) and the local Novel Translator server.
+// Relays messages between the Wattpad page (content.js) / Novelpia chapter page (novelpia.js) and the local Novel Translator server.
 // Only talks to the local app; never reads cookies or passwords.
 const DEFAULT_APP = "http://127.0.0.1:8765";
 
@@ -30,6 +30,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "scan_event": return call(`/api/ext/scan/${encodeURIComponent(msg.id)}/event`, "POST", msg.data);
       case "stories": return call("/api/ext/stories", "POST", msg.data);
       case "diag": return call("/api/ext/diag", "POST", msg.data);
+      case "novelpia": return call("/api/ext/novelpia", "POST", msg.data);
       case "getApp": return { app: await appBase() };
       case "setApp": await chrome.storage.local.set({ app: msg.app }); return { ok: true };
       default: throw new Error("unknown message " + msg.type);
