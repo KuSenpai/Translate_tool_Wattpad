@@ -246,6 +246,7 @@ function redo() { if (H.idx < H.stack.length - 1) { ed().innerHTML = H.stack[++H
 
 function setDirty(v) { S.dirty = v; $("#dirtyMark").classList.toggle("hidden", !v); }
 
+const hiddenWarnings = new Set(); // chapter warnings dismissed this session (reappear after reload)
 function renderChapter(ch, { keepEditor = false } = {}) {
   S.chapter = ch;
   $("#titleInput").value = ch.title || "";
@@ -259,9 +260,15 @@ function renderChapter(ch, { keepEditor = false } = {}) {
   $("#viMeta").textContent = `${ch.vi_heading || ""} · ${ch.draft.length} đoạn`;
 
   const conf = { high: "", medium: "", low: "Độ tin cậy THẤP — " }[ch.confidence];
-  $("#chapterWarnings").innerHTML =
+  const ackKey = `ack:${S.project.id}:${ch.number}:${ch.source_hash}:${ch.ko_choice}:${ch.vi_choice}`;
+  const warnEl = $("#chapterWarnings");
+  warnEl.innerHTML = hiddenWarnings.has(ackKey) ? "" :
     alertBox(ch.notices, "", "Lưu ý:") +
     alertBox(ch.warnings, ch.confidence === "low" ? "error" : "", `${conf}Cảnh báo tách chương ${ch.number}:`);
+  if (warnEl.innerHTML) {
+    warnEl.insertAdjacentHTML("afterbegin", `<button class="small warn-close" title="Ẩn cảnh báo của chương này">✕</button>`);
+    warnEl.firstChild.onclick = () => { hiddenWarnings.add(ackKey); warnEl.innerHTML = ""; };
+  }
 
   const vr = $("#variantRow");
   if (ch.ko_options > 1 || ch.vi_options > 1) {
@@ -278,7 +285,6 @@ function renderChapter(ch, { keepEditor = false } = {}) {
     }));
   } else vr.classList.add("hidden");
 
-  const ackKey = `ack:${S.project.id}:${ch.number}:${ch.source_hash}:${ch.ko_choice}:${ch.vi_choice}`;
   const locked = ch.confidence === "low" && store.get(ackKey) !== "1";
   $("#lockOverlay").classList.toggle("hidden", !locked);
   ed().contentEditable = locked ? "false" : "true";
