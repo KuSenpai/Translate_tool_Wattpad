@@ -182,3 +182,20 @@ def test_avoid_check_has_no_false_positives():
     assert len(hard("Hắn tới LA.")) == 1
     assert len(hard("Sức mạnh Vô Hạn.")) == 1
     assert len(hard("Tung Lưỡi Gió.")) == 1
+
+
+def test_job_carries_address_examples_from_its_own_earlier_chapters(client, monkeypatch):
+    """Chapter 1922 is translated with how 1920 (translated earlier in the same job) rendered the 형 dialogue."""
+    from app.ai.novel_translator import MockChapterTranslator
+    seen, real = {}, MockChapterTranslator.translate
+
+    def spy(self, **kw):
+        seen[kw["heading"]] = kw["notes"]
+        return real(self, **kw)
+    monkeypatch.setattr(MockChapterTranslator, "translate", spy)
+    text = KO_TXT.replace("김수현은 웃었다.", "“형, 같이 가자.”")
+    meta = client.post("/api/translate/analyze", files={"file": ("t.txt", text.encode())}).json()
+    job = client.post("/api/translate/jobs", json={"sid": meta["sid"], "concurrency": 1}).json()
+    wait(client, job["id"])
+    assert "[Ch 1920] “형, 오늘도 늦었어?” → Bản dịch thử đoạn 2" in seen["1922. 다크 문"]
+    assert "CÁCH ĐÃ DỊCH" not in seen["1920. 다크 문"]                  # nothing earlier to learn from

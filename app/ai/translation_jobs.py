@@ -322,19 +322,35 @@ class TranslationManager:
         auto = [{"source": s, "target": t} for s, t in job["auto_terms"].items() if s not in known]
         return glossary_prompt(entries_for_text(entries + auto, korean_text)), notes
 
-    def _with_examples(self, job: dict, number: int, korean: str, notes: str) -> str:
-        """Add how the same characters/terms were rendered in the project's earlier chapters (see consistency.py)."""
-        pid = job.get("glossary_project")
-        if not pid:
-            return notes
+    def _with_examples(self, job: dict, number: int, korean: str, notes: str, own: list[dict]) -> str:
+        """Add how the same characters/terms were rendered in earlier chapters — the ones this job already translated
+        (`own`) and the linked project's (see consistency.py)."""
         try:
-            from ..storage.project_state import store
             from .consistency import with_examples
-            from .retranslate import previous_chapters      # lazy: retranslate imports this module
-            return with_examples(notes, previous_chapters(pid, number), korean, [e["source"] for e in store.get_glossary(pid)])[0]
+            previous, sources = list(own), list(job["auto_terms"])
+            if pid := job.get("glossary_project"):
+                from ..storage.project_state import store
+                from .retranslate import previous_chapters      # lazy: retranslate imports this module
+                seen = {p["number"] for p in previous}
+                previous += [p for p in previous_chapters(pid, number) if p["number"] not in seen]
+                sources += [e["source"] for e in store.get_glossary(pid)]
+            return with_examples(notes, previous, korean, sources)[0]
         except Exception as e:      # the examples are an aid: never fail the chapter because of them
             log.warning("No consistency examples for chapter %d: %s", number, e)
             return notes
+
+    def _own_previous(self, job: dict, ch: dict, blocks: list, by_idx: dict, count: int = 5) -> list[dict]:
+        """Up to `count` chapters before `ch` this job already translated, newest first, as consistency.py wants them.
+        With concurrency > 1 the chapter right before may still be running; it is simply not used then."""
+        order = [c["idx"] for c in job["chapters"]]
+        out = []
+        for prev in reversed(order[:order.index(ch["idx"])]):
+            if len(out) >= count:
+                break
+            if r := self._result(job["id"], prev):
+                out.append({"number": by_idx[prev].number, "ko_paragraphs": chapter_paragraphs(blocks, by_idx[prev]),
+                            "vi_paragraphs": r["paragraphs"]})
+        return out
 
     def _prev_tail(self, job: dict, ch: dict) -> list[str]:
         order = [c["idx"] for c in job["chapters"]]
@@ -378,7 +394,8 @@ class TranslationManager:
                 self._save(j)
                 glossary, notes = self._glossary_text(j, "\n".join(paragraphs + [src.heading]))
                 tail, style = self._prev_tail(j, c), j["style"]
-            notes = self._with_examples(j, src.number, "\n".join(paragraphs + [src.heading]), notes)
+            notes = self._with_examples(j, src.number, "\n".join(paragraphs + [src.heading]), notes,
+                                        self._own_previous(j, c, blocks, by_idx))
             log.info("Translating chapter %d (%d paragraphs)", src.number, len(paragraphs))
             result, error, code, usage = None, None, None, {}
             for attempt in range(3):
