@@ -17,7 +17,9 @@ def fake_run(payload, seen=None):
             seen.update(cmd=cmd, input=input, env=env)
         if cmd[1:3] == ["auth", "status"]:
             return SimpleNamespace(stdout=json.dumps({"loggedIn": True, "authMethod": "claude.ai"}), stderr="", returncode=0)
-        return SimpleNamespace(stdout=json.dumps(payload), stderr="", returncode=0)
+        events = [{"type": "system", "subtype": "init"}, *([payload["_rate"]] if "_rate" in payload else []),
+                  {"type": "result", **{k: v for k, v in payload.items() if k != "_rate"}}]   # stream-json lines
+        return SimpleNamespace(stdout="\n".join(json.dumps(e) for e in events), stderr="", returncode=0)
     return run
 
 
@@ -25,6 +27,7 @@ def client(monkeypatch, payload, seen=None):
     monkeypatch.setattr(claude_code, "find_claude", lambda: "claude.exe")
     monkeypatch.setattr(claude_code.subprocess, "run", fake_run(payload, seen))
     claude_code._status_cache = (0.0, {})
+    claude_code.five_hour.clear()
     return ClaudeCodeJSON("claude-code:opus", "medium")
 
 
@@ -44,6 +47,23 @@ def test_success_and_command(monkeypatch):
     assert cmd[cmd.index("--tools") + 1] == "" and cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
     assert seen["input"] == "<chapter>김수현</chapter>"                  # prompt via stdin, not the command line
     assert "ANTHROPIC_API_KEY" not in seen["env"]                       # → subscription, never API billing
+
+
+def test_stops_at_five_hour_threshold(monkeypatch):
+    from app import config
+    from app.ai.translation_jobs import reset_delay
+    monkeypatch.setattr(config, "CLAUDE_CODE_STOP_AT", 0.8)
+    resets = int(time.time()) + 3600
+    rate = lambda u: {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": u, "resetsAt": resets}, "seven_day": {"utilization": 0.99, "resetsAt": resets}}}}
+    c = client(monkeypatch, dict(OK, _rate=rate(0.79)))
+    c.call(system="s", user="u", schema=SCHEMA)                         # 79% used: still runs
+    assert claude_code.five_hour["utilization"] == 0.79
+    monkeypatch.setattr(claude_code.subprocess, "run", fake_run(dict(OK, _rate=rate(0.81))))
+    c.call(system="s", user="u", schema=SCHEMA)                         # this call pushes it past 80%…
+    with pytest.raises(LLMUsageLimit) as e:                             # …so the next one is not sent
+        c.call(system="s", user="u", schema=SCHEMA)
+    assert "81%" in e.value.message and 3600 <= reset_delay(e.value.message) <= 3600 + 125
 
 
 def test_result_text_json_fallback(monkeypatch):

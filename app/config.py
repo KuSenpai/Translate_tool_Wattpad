@@ -38,6 +38,8 @@ WATTPAD_PROXY = os.getenv("WATTPAD_PROXY", "").strip()
 WATTPAD_HEADLESS = os.getenv("WATTPAD_HEADLESS", "false").strip().lower() == "true"
 WATTPAD_LOGIN_TIMEOUT = int(os.getenv("WATTPAD_LOGIN_TIMEOUT", "600"))
 WATTPAD_PUBLISH_WAIT = int(os.getenv("WATTPAD_PUBLISH_WAIT", "30"))  # seconds to confirm a publish
+# Claude Code (subscription): stop sending work once this share of the 5-hour window is used (keeps the rest for you)
+CLAUDE_CODE_STOP_AT = float(os.getenv("CLAUDE_CODE_STOP_AT", "0.8"))
 
 
 def ensure_dirs() -> None:

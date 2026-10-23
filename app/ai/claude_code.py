@@ -70,6 +70,8 @@ def _workdir() -> Path:
 
 
 _status_cache: tuple[float, dict] = (0.0, {})
+# Last 5-hour window reported by the CLI ("rate_limit_event"): {"utilization": 0..1, "resetsAt": epoch}
+five_hour: dict = {}
 
 
 def status(force: bool = False) -> dict:
@@ -111,7 +113,12 @@ class ClaudeCodeJSON:
 
     def call(self, *, system: str, user: str, schema: dict, max_tokens: int = 64000,
              refusal_message: str = "Claude từ chối xử lý nội dung này") -> tuple[dict, dict, str]:
-        cmd = [self.exe, "-p", "--output-format", "json", "--tools", "", "--no-session-persistence",
+        used, resets = five_hour.get("utilization") or 0, five_hour.get("resetsAt") or 0
+        if used >= config.CLAUDE_CODE_STOP_AT and resets > time.time():
+            # "|epoch" lets the jobs' reset_delay() resume right when the window resets
+            raise LLMUsageLimit(f"Đã dùng {used:.0%} hạn mức 5 tiếng của gói Claude (ngưỡng dừng "
+                                f"{config.CLAUDE_CODE_STOP_AT:.0%}) — chờ tới {time.strftime('%H:%M', time.localtime(resets))}|{int(resets)}")
+        cmd = [self.exe, "-p", "--output-format", "stream-json", "--verbose", "--tools", "", "--no-session-persistence",
                "--setting-sources", "user", "--model", self.alias, "--system-prompt", system,
                "--json-schema", json.dumps(schema, ensure_ascii=False)]
         if self.effort:
@@ -123,10 +130,18 @@ class ClaudeCodeJSON:
             raise LLMTimeout("Claude Code không trả kết quả sau 20 phút.")
         except OSError as e:
             raise LLMError(f"Không chạy được Claude Code: {e}", code="CLAUDE_CODE_MISSING")
-        try:
-            obj = json.loads(out.stdout.strip().splitlines()[-1]) if out.stdout.strip() else {}
-        except (json.JSONDecodeError, IndexError):
-            obj = {}
+        obj = {}
+        for line in (out.stdout or "").splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "result":
+                obj = ev
+            elif ev.get("type") == "rate_limit_event":
+                w = ((ev.get("rate_limit_info") or {}).get("unifiedWindows") or {}).get("five_hour")
+                if w:
+                    five_hour.update(w)
         if not obj:
             tail = (out.stderr or out.stdout or "").strip()[-300:]
             raise LLMError(f"Claude Code lỗi (mã {out.returncode}): {tail or 'không có phản hồi'}", code="CLAUDE_CODE_ERROR")

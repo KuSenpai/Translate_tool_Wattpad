@@ -39,6 +39,8 @@ let toastTimer;
 function toast(msg, kind = "", sticky = false) {
   const t = $("#toast");
   t.textContent = msg; t.className = `toast ${kind}`;
+  // Popover = top layer, so the toast also shows above an open modal dialog (re-show to stack on top of it).
+  if (t.showPopover) { if (t.matches(":popover-open")) t.hidePopover(); t.showPopover(); }
   clearTimeout(toastTimer);
   if (!sticky) toastTimer = setTimeout(() => t.classList.add("hidden"), kind === "error" ? 9000 : 3500);
 }
@@ -449,6 +451,7 @@ async function retranslate() {
   const model = $("#rtModel").value;
   if (!model) return toast("Chưa có danh sách model.", "error");
   if (S.dirty && !confirm("Bản đang sửa có thay đổi chưa lưu. Kết quả dịch lại chỉ hiện để xem, chưa thay gì — tiếp tục?")) return;
+  if (window.Notification?.permission === "default") Notification.requestPermission();   // for the "done" popup when the tab is in background
   store.set("rt:model", model);
   $("#rtStart").disabled = true;
   const t0 = Date.now();
@@ -460,12 +463,19 @@ async function retranslate() {
       model, effort: $("#rtEffort").value, instruction: $("#rtInstruction").value.trim(), auto_fix: $("#rtAutoFix").checked, parallel: +$("#rtParallel").value,
       current: $("#rtRevise").checked ? blocksText(editorToBlocks(ed())) : null,
     });
-    if (!S.chapter || S.chapter.number !== number || S.project.id !== pid) return;   // user moved to another chapter meanwhile
+    if (!S.chapter || S.chapter.number !== number || S.project.id !== pid) return notifyDone(`✔ Chương ${number} đã dịch lại xong (bạn đã chuyển sang chương khác nên kết quả không hiển thị).`, "ok");
     S.retrans = r; r.elapsed = Math.round((Date.now() - t0) / 1000);
     renderRetransSummary(); openRetransDialog();
+    notifyDone(`✔ Đã ${r.consistency?.revised ? "sửa" : "dịch lại"} xong chương ${number}`, "ok");
   } catch (e) {
     $("#rtResult").innerHTML = `<div class="alert error">${e.code ? `<b>[${esc(e.code)}]</b> ` : ""}${esc(e.message)}</div>`;
+    notifyDone(`✖ Dịch lại chương ${number} thất bại: ${e.code ? `[${e.code}] ` : ""}${e.message}`, "error");
   } finally { clearInterval(timer); $("#rtStart").disabled = false; }
+}
+// Corner toast in the page + a system notification if the user is on another tab/window.
+function notifyDone(msg, kind) {
+  toast(msg, kind);
+  if (document.hidden && window.Notification?.permission === "granted") new Notification("Translate tool", { body: msg });
 }
 
 // Result UI: a compact summary in the narrow side tab + a wide dialog (compare, per-paragraph copy, one-click replace).

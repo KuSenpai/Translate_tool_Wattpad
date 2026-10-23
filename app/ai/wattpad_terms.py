@@ -276,7 +276,7 @@ class WattpadTermScan:
                     if e.code == "AI_USAGE_LIMIT":
                         with self._lock:
                             self._save_proposals(pid, found, glossary)
-                            self._finish("stopped", f"{e.message} — quét lại sau khi hạn mức được làm mới.")
+                            self._finish("stopped", f"{e.message.split('|')[0]} — quét lại sau khi hạn mức được làm mới.")
                         return
                     err, usage = e.message, (e.details or {}).get("usage", {})
                     break

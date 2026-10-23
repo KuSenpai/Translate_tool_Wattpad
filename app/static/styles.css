@@ -69,7 +69,7 @@ input, select { background: var(--panel); border: 1px solid var(--border); borde
 .alert.error { border-color: var(--err-border); background: var(--err-bg); }
 .alert ul { margin: 4px 0 0; padding-left: 18px; }
 
-.toast { position: fixed; right: 18px; bottom: 18px; max-width: 460px; z-index: 50; padding: 10px 14px; border-radius: 8px;
+.toast { position: fixed; inset: auto 18px 18px auto; margin: 0; color: inherit; max-width: 460px; z-index: 50; padding: 10px 14px; border-radius: 8px;
   background: var(--panel); border: 1px solid var(--border); box-shadow: 0 6px 24px rgba(0,0,0,.18); white-space: pre-wrap; }
 .toast.error { border-color: var(--err-border); background: var(--err-bg); }
 .toast.ok { border-color: var(--ok); }
