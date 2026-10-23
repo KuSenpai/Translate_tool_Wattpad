@@ -141,11 +141,12 @@ function replaceOne() {
 function replaceAll() {
   const re = buildRegex(); const { out } = collectMatches();
   if (!re || !out.length || !editable()) return;
-  const keep = document.activeElement;
+  const keep = document.activeElement, top = ed.scrollTop, winY = window.scrollY;
   ed.focus();
   for (let i = out.length - 1; i >= 0; i--) replaceRange(out[i].range, replacementFor(out[i], re)); // back to front keeps earlier ranges valid
-  keep?.focus?.();
+  keep?.focus?.({ preventScroll: true });
   window.getSelection().removeAllRanges();
+  ed.scrollTop = top; window.scrollTo(window.scrollX, winY); // the last edit is the first match, which would yank the view to the top
   F.cur = 0; refresh({ keepCur: false });
   $("#replaceMsg").textContent = `Đã thay ${fmt(out.length)} chỗ (Ctrl+Z để hoàn tác).`;
 }
