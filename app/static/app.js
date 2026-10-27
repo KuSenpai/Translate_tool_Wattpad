@@ -716,6 +716,7 @@ async function openPreview() {
   $("#previewTitle").textContent = ch.title;
   $("#previewBody").innerHTML = blocksHtml(ch.draft);
   $("#wpTitle").value = $("#wpTitle").dataset.ch === String(ch.number) ? $("#wpTitle").value : ch.title;
+  if ($("#wpTitle").dataset.ch !== String(ch.number)) $("#wpPartUrl").value = "";
   $("#wpTitle").dataset.ch = ch.number;
   $("#wpConfirm").checked = false;
   renderPreviewState();
@@ -734,12 +735,40 @@ function renderPreviewState() {
     : "Chưa có.";
   updatePublishButton();
 }
+// Which Wattpad part this publish writes to — mirrors existing_part() on the server: the pasted link, else the part
+// the chapter was published to before (updated in its own story), else a new part at the end of the chosen story.
+function publishTarget() {
+  const ch = S.chapter, link = $("#wpPartUrl").value.trim(), wp = ch?.wattpad || {};
+  const storyName = (id) => [...$("#wpStory").options].find((o) => o.value === id)?.textContent || `#${id}`;
+  if (link) {
+    let m = link.match(/\/myworks\/(\d+)[^/]*\/write\/(\d+)/);
+    if (m) return { update: true, part: m[2], story: m[1], storyTitle: storyName(m[1]), url: link };
+    m = link.match(/wattpad\.com\/(\d+)(?:-[^/?#]*)?\/?(?:[?#]|$)/);
+    if (!m) return { bad: true };
+    const story = wp.part_id === m[1] ? wp.story_id : null;
+    return { update: true, part: m[1], story, storyTitle: story ? storyName(story) : null, url: link };
+  }
+  const done = (ch?.publish_history || []).filter((h) => h.ok && h.mode === "publish" && h.part_id && h.part_id === wp.part_id);
+  if (!done.length) return { update: false };
+  return { update: true, part: wp.part_id, story: wp.story_id, url: wp.part_url,
+    storyTitle: done[done.length - 1].story_title || storyName(wp.story_id) };
+}
+function renderTarget(t) {
+  $("#wpTarget").innerHTML = t.bad ? `<span class="alert error">Link chương Wattpad không hợp lệ.</span>`
+    : t.update ? `♻️ Sẽ <b>cập nhật</b> chương đã đăng${t.url ? ` <a href="${esc(t.url)}" target="_blank" rel="noopener">#${esc(t.part)}</a>` : ` #${esc(t.part)}`}
+        trong truyện <b>${esc(t.storyTitle || "đang chọn ở ô Story")}</b> — thay toàn bộ nội dung, không tạo chương mới.`
+    : `➕ Sẽ đăng thành <b>chương mới</b> ở cuối truyện đang chọn. Nếu chương này đã có trên Wattpad, dán link của nó ở trên.`;
+}
+
 // Everything that still prevents publishing, in plain words (shown under the button).
 function publishBlockers() {
   const ch = S.chapter, out = [];
   if (!ch) return ["Chưa mở chương."];
+  const t = publishTarget();
+  renderTarget(t);
   if (ch.status === "PUBLISHED") out.push("Chương này đã đăng. Muốn đăng lại thì sửa nội dung trước (phần cũ trên Wattpad sẽ được cập nhật).");
-  if (!$("#wpStory").value) out.push("Chọn truyện ở ô Story.");
+  if (t.bad) out.push("Sửa hoặc xoá link chương Wattpad.");
+  if (!t.story && !$("#wpStory").value) out.push("Chọn truyện ở ô Story.");
   if (!$("#wpTitle").value.trim()) out.push("Nhập tiêu đề chương.");
   if (!$("#wpConfirm").checked) out.push("Tick “I confirm this is the final version”.");
   if (S.job) out.push("Đang có một thao tác Wattpad chạy — đợi xong hoặc bấm Huỷ.");
@@ -751,7 +780,8 @@ const needsReview = () => ["LOADED", "EDITING"].includes(S.chapter?.status);
 function updatePublishButton() {
   const blockers = publishBlockers();
   $("#wpPublishBtn").disabled = blockers.length > 0;
-  $("#wpPublishBtn").textContent = $("#wpMode").value === "draft" ? "Lưu nháp lên Wattpad" : "Publish";
+  $("#wpPublishBtn").textContent = $("#wpMode").value === "draft" ? "Lưu nháp lên Wattpad"
+    : S.chapter && publishTarget().update ? "♻️ Cập nhật lên Wattpad" : "Publish";
   $("#wpBlockers").innerHTML = blockers.length
     ? `Để bật nút ${$("#wpMode").value === "draft" ? "lưu nháp" : "Publish"}:<ul>${blockers.map((b) => `<li>${esc(b)}</li>`).join("")}</ul>`
     : needsReview() ? "Khi bấm, chương sẽ được đánh dấu đã review rồi đăng." : "";
@@ -856,9 +886,10 @@ async function addManualStory(ev) {
 }
 function publish() {
   const opt = $("#wpStory").selectedOptions[0];
-  const mode = $("#wpMode").value;
-  const verb = mode === "draft" ? "lưu nháp" : "ĐĂNG CÔNG KHAI";
-  if (!confirm(`Xác nhận ${verb} “${$("#wpTitle").value}” lên truyện “${opt.textContent}”?`)) return;
+  const mode = $("#wpMode").value, target = publishTarget();
+  const verb = target.update ? (mode === "draft" ? "LƯU ĐÈ nội dung chương đã đăng" : "CẬP NHẬT chương đã đăng")
+    : mode === "draft" ? "lưu nháp" : "ĐĂNG CÔNG KHAI";
+  if (!confirm(`Xác nhận ${verb} “${$("#wpTitle").value}” ${target.update ? `(#${target.part}) trong` : "lên"} truyện “${target.storyTitle || opt.textContent}”?`)) return;
   // Extension mode: the Wattpad tab opens in this same (logged-in) browser. Open it now, inside the
   // click, so the popup blocker allows it; its address is set once the task exists.
   const tab = S.wp?.mode === "extension" ? window.open("about:blank", "_blank") : null;
@@ -866,7 +897,8 @@ function publish() {
     ? api("POST", chUrl("/status"), { event: "review" }).then((ch) => { S.chapter = ch; renderPreviewState(); })
     : Promise.resolve();
   const start = review.then(() => api("POST", chUrl("/publish"), {
-    story_id: opt.value, story_title: opt.textContent, title: $("#wpTitle").value.trim(), mode, confirm: $("#wpConfirm").checked,
+    story_id: target.story || opt.value, story_title: target.story ? target.storyTitle : opt.textContent,
+    title: $("#wpTitle").value.trim(), mode, confirm: $("#wpConfirm").checked, part_url: $("#wpPartUrl").value.trim(),
   })).then((job) => {
     if (tab) { if (job.open_url) tab.location.href = job.open_url; else tab.close(); }
     return job;
@@ -874,7 +906,7 @@ function publish() {
   runJob(start, async (j) => {
     S.chapter = await api("GET", chUrl());
     renderPreviewState();
-    if (j.state === "done") toast(mode === "draft" ? "Đã lưu nháp lên Wattpad" : "Đăng chương thành công 🎉", "ok");
+    if (j.state === "done") toast(j.result?.message || (mode === "draft" ? "Đã lưu nháp lên Wattpad" : "Đăng chương thành công 🎉"), "ok");
   });
 }
 
@@ -989,7 +1021,7 @@ function init() {
   $("#wpLoginBtn").addEventListener("click", wattpadLogin);
   $("#wpStoriesBtn").addEventListener("click", fetchStories);
   $("#wpManualForm").addEventListener("submit", addManualStory);
-  for (const id of ["#wpConfirm", "#wpStory", "#wpMode", "#wpTitle"]) $(id).addEventListener("input", updatePublishButton);
+  for (const id of ["#wpConfirm", "#wpStory", "#wpMode", "#wpTitle", "#wpPartUrl"]) $(id).addEventListener("input", updatePublishButton);
   $("#wpPublishBtn").addEventListener("click", publish);
   document.addEventListener("nt:toast", (ev) => toast(ev.detail.msg, ev.detail.kind));
   document.addEventListener("nt:reload-project", () => { if (S.project && !S.dirty) openProject(S.project.id); });

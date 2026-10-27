@@ -252,6 +252,7 @@ class PublishReq(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     mode: str = Field("publish", pattern="^(publish|draft)$")
     confirm: bool = False
+    part_url: str = Field("", max_length=500)   # Wattpad link of this chapter: update that part instead of adding one
 
 
 @router.get("/wattpad/status")
@@ -290,7 +291,7 @@ def wattpad_add_story(req: ManualStoryReq):
 @router.post("/projects/{pid}/chapters/{number}/publish")
 def publish_chapter(pid: str, number: int, req: PublishReq):
     return publish_service.publisher.publish(pid, number, story_id=req.story_id, story_title=req.story_title,
-                                             title=req.title, mode=req.mode, confirm=req.confirm)
+                                             title=req.title, mode=req.mode, confirm=req.confirm, part_url=req.part_url)
 
 
 class BatchPublishReq(BaseModel):

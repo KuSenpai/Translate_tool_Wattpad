@@ -466,3 +466,83 @@ def test_new_part_that_ignores_script_clicks_asks_the_user(env, client, book, fa
     j = wait_job(client, job["id"], page)
     assert j["state"] == "done", j
     assert len(set(fake.parts) - before) == 1
+
+
+# ---------------------------------------------------------------- updating a chapter that is already on Wattpad
+def edit_and_review(client, pid, number, text):
+    ch = client.get(f"/api/projects/{pid}/chapters/{number}").json()
+    blocks = ch["draft"] + [{"type": "paragraph", "runs": [{"text": text}]}]
+    assert client.put(f"/api/projects/{pid}/chapters/{number}/draft", json={"blocks": blocks}).status_code == 200
+    client.post(f"/api/projects/{pid}/chapters/{number}/status", json={"event": "review"})
+
+
+def test_edited_published_chapter_updates_its_own_part(env, client, book, fake):
+    """Re-publishing an edited chapter rewrites the part it was published to, in that part's story — even when the
+    publish form shows another story — and never adds a new chapter."""
+    page = env["page"]
+    pid = ready(client, book, 12, "ext-update-own.docx")
+    job = publish_one(client, pid, 12, "111", "Chương 12")
+    page.goto(job["open_url"])
+    assert wait_job(client, job["id"], page)["state"] == "done"
+    part_id = client.get(f"/api/projects/{pid}/chapters/12").json()["wattpad"]["part_id"]
+
+    edit_and_review(client, pid, 12, "Đoạn đã sửa lại.")
+    before = set(fake.parts)
+    job = publish_one(client, pid, 12, "222", "Chương 12 (sửa)")               # another story picked in the form
+    assert job["open_url"] == f"{fake.base}/myworks/111/write/{part_id}"
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page)
+    assert j["state"] == "done", j
+    assert "cập nhật" in j["result"]["message"]
+    assert set(fake.parts) == before and part_id not in fake.order.get("222", [])   # nothing new, nowhere else
+    part = fake.parts[part_id]
+    assert part["published"] and part["title"] == "Chương 12 (sửa)" and "Đoạn đã sửa lại." in part["text"]
+    ch = client.get(f"/api/projects/{pid}/chapters/12").json()
+    assert ch["status"] == "PUBLISHED" and ch["publish_history"][-1]["story_id"] == "111"
+
+
+def test_pasted_link_updates_a_chapter_published_outside_the_tool(env, client, book, fake):
+    page = env["page"]
+    old = fake.existing_part("111")                                         # published by hand on Wattpad
+    pid = ready(client, book, 11, "ext-update-link.docx")
+    before = set(fake.parts)
+    job = client.post(f"/api/projects/{pid}/chapters/11/publish", json={
+        "story_id": "222", "title": "Chương 11", "mode": "publish", "confirm": True,
+        "part_url": f"{fake.base}/myworks/111/write/{old}"}).json()
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page)
+    assert j["state"] == "done", j
+    assert set(fake.parts) == before
+    assert fake.old[old]["title"] == "Chương 11" and "Hết chương 11." in fake.old[old]["text"]
+    assert client.get(f"/api/projects/{pid}/chapters/11").json()["wattpad"] == {
+        "story_id": "111", "part_id": old, "part_url": f"{fake.base}/{old}"}
+
+
+def test_update_never_falls_back_to_a_new_part(client, book):
+    """The part to update is gone: the publish fails instead of adding a duplicate chapter (the extension reports
+    "part_gone", which for a new chapter's retry means: create the part again)."""
+    from app.publishing import publish_service
+    pid = ready(client, book, 13, "ext-update-gone.docx")
+    job = client.post(f"/api/projects/{pid}/chapters/13/publish", json={
+        "story_id": "111", "title": "Chương 13", "mode": "publish", "confirm": True,
+        "part_url": "https://www.wattpad.com/987654321-chuong-13"}).json()
+    headers = {"X-NT-Extension": "1"}
+    assert client.post(f"/api/ext/task/{job['id']}/event", json={"part_gone": True}, headers=headers).status_code == 200
+    j = client.get(f"/api/jobs/{job['id']}").json()
+    assert j["state"] == "error" and j["error_code"] == "WATTPAD_PART_NOT_FOUND"
+    assert publish_service.publisher.bridge.task is None
+
+
+def test_existing_part_links():
+    from app.errors import StateError
+    from app.publishing.publish_service import existing_part
+    rec = {"wattpad": {"story_id": "7", "part_id": "55", "part_url": "u"},
+           "publish_history": [{"ok": False, "mode": "publish", "part_id": "55"}]}
+    assert existing_part(rec) is None                                          # only a failed attempt: a retry
+    rec["publish_history"].append({"ok": True, "mode": "publish", "part_id": "55", "story_title": "S"})
+    assert existing_part(rec) == {"story_id": "7", "part_id": "55", "story_title": "S"}
+    assert existing_part(rec, "https://www.wattpad.com/myworks/9-abc/write/66") == {"story_id": "9", "part_id": "66"}
+    assert existing_part(rec, "https://www.wattpad.com/55-chuong-moi?x=1") == {"story_id": "7", "part_id": "55"}
+    assert existing_part(rec, "https://www.wattpad.com/66") == {"story_id": None, "part_id": "66"}
+    with pytest.raises(StateError):
+        existing_part(rec, "https://www.wattpad.com/story/123-truyen")      # a story, not a chapter

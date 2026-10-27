@@ -368,13 +368,17 @@ class WattpadPublisher:
         return bool(want) and got[:40] == want[:40] and got[-40:] == want[-40:] and abs(len(got) - len(want)) <= max(20, len(want) // 50)
 
     def publish(self, *, story_id: str, title: str, blocks: list[dict], mode: str = "publish",
-                part_id: Optional[str] = None) -> dict:
-        """Create (or update, when `part_id` is given) a part; publish it only if mode == 'publish'."""
+                part_id: Optional[str] = None, update: bool = False) -> dict:
+        """Create (or update, when `part_id` is given) a part; publish it only if mode == 'publish'.
+        `update`: the part is an already-published chapter — if it is gone, fail rather than add a duplicate."""
         if part_id:
             self.progress(f"Mở lại phần đã tạo trước đó (#{part_id})…")
             self.goto(self.url("part_edit_path", story_id=story_id, part_id=part_id))
             self._ensure_session()
             if self._first("not_found", 2) or not re.search(SELECTORS["part_url_regex"], self.page.url):
+                if update:
+                    raise WattpadError("WATTPAD_PART_NOT_FOUND", f"Không mở được chương #{part_id} trên Wattpad để cập nhật. "
+                                       "Không tạo chương mới — kiểm tra link rồi thử lại.")
                 self.progress("Phần cũ không còn, sẽ tạo phần mới.")
                 part_id = None
         if not part_id:

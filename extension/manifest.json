@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Novel Translator – Wattpad & Novelpia Helper",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Đăng chương từ Novel Translator (chạy trên máy bạn) lên Wattpad, và gửi chương Novelpia bạn đang đọc về tool — bằng chính trình duyệt đã đăng nhập của bạn.",
   "permissions": ["storage"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],

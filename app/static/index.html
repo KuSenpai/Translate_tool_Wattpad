@@ -284,6 +284,10 @@
       <label>Chapter title:
         <input id="wpTitle">
       </label>
+      <label title="Chỉ cần khi cập nhật một chương đã có trên Wattpad mà tool chưa biết link">Link chương trên Wattpad (nếu cập nhật chương đã đăng):
+        <input id="wpPartUrl" placeholder="https://www.wattpad.com/123456789-ten-chuong hoặc …/myworks/…/write/…" autocomplete="off">
+      </label>
+      <div id="wpTarget" class="small"></div>
       <label>Hành động:
         <select id="wpMode">
           <option value="publish">Publish (công khai)</option>
@@ -486,13 +490,14 @@
     <div class="rt-actions">
       <button class="primary" data-rt="apply" title="Thay ngay bản đang sửa bằng bản dịch lại (Undo được)">⚡ Thay bản hiện tại</button>
       <button data-rt="apply-save" title="Thay rồi lưu draft luôn">💾 Thay &amp; lưu draft</button>
+      <button data-rt="restore" id="rtDlgRestore" class="hidden" title="Đưa bản trước khi thay trở lại editor (Undo được)">↩ Khôi phục bản cũ</button>
       <span class="sep"></span>
       <button data-rt="copy">📋 Copy bản dịch</button>
       <button data-rt="copy-title">📋 Copy tiêu đề</button>
       <span class="sep"></span>
       <label class="check small"><input type="checkbox" id="rtDlgTitleCb" class="rt-title-cb" checked> Cập nhật cả tiêu đề</label>
       <label class="small lh-ctl">So sánh với
-        <select id="rtCompare"><option value="draft">Bản đang sửa</option><option value="ko">Bản Hàn</option><option value="none">Không</option></select>
+        <select id="rtCompare"><option value="draft">Bản đang sửa</option><option value="ko">Bản Hàn</option><option value="backup" hidden>Bản cũ (trước khi thay)</option><option value="none">Không</option></select>
       </label>
       <span class="spacer"></span>
       <button class="ghost" data-rt="dismiss">Bỏ qua kết quả</button>

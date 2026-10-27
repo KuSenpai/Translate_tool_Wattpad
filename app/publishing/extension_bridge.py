@@ -51,7 +51,7 @@ class ExtensionBridge:
 
     def create_publish_task(self, *, story_id: str, story_title: str, title: str, blocks: list[dict], mode: str,
                             part_id: Optional[str], on_done: Callable[[dict, dict], None],
-                            countdown: int = 5, batch: Optional[dict] = None) -> dict:
+                            countdown: int = 5, batch: Optional[dict] = None, update: bool = False) -> dict:
         hint = ("" if self.connected() else
                 " Chưa thấy extension kết nối — hãy chắc chắn đã cài “Novel Translator – Wattpad Helper” vào Edge.")
         job = self.jobs.start_external(
@@ -67,8 +67,9 @@ class ExtensionBridge:
         self.task = {"id": job["id"], "story_id": story_id, "story_title": story_title, "title": title,
                      "html": blocks_to_html(blocks), "text": blocks_to_text(blocks), "mode": mode,
                      "part_id": part_id, "from_part": None, "stage": "pending", "open_url": open_url,
-                     "countdown": countdown, "batch": batch, "created_at": now_iso()}
-        log.info("Extension task %s created: story=%s mode=%s reuse_part=%s", job["id"], story_id, mode, bool(part_id))
+                     "countdown": countdown, "batch": batch, "update": update, "created_at": now_iso()}
+        log.info("Extension task %s created: story=%s mode=%s reuse_part=%s update=%s",
+                 job["id"], story_id, mode, bool(part_id), update)
         return {**job, "open_url": open_url}
 
     def cancel(self, job_id: str) -> None:
@@ -112,7 +113,11 @@ class ExtensionBridge:
                 self.task[key] = str(data[key])
         if "from_part" in data:  # editor page the "New Part" click started from ("" = not from an editor)
             self.task["from_part"] = str(data["from_part"]) or None
-        if data.get("part_gone"):  # the part created in an earlier attempt no longer exists on Wattpad
+        if data.get("part_gone") and self.task.get("update"):   # never add a duplicate of an already-published chapter
+            data = {"final": True, "ok": False, "error_code": "WATTPAD_PART_NOT_FOUND",
+                    "message": f"Không mở được chương #{self.task['part_id']} trên Wattpad để cập nhật (đã xoá, sai link hoặc "
+                               "không thuộc truyện này). Không tạo chương mới — kiểm tra link rồi thử lại."}
+        elif data.get("part_gone"):  # the part created in an earlier attempt no longer exists on Wattpad
             self.task.update(part_id=None, stage="pending", from_part=None)
         if data.get("message"):
             self.jobs.progress(task_id, str(data["message"])[:300])

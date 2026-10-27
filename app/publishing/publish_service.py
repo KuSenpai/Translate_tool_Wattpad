@@ -80,6 +80,31 @@ def save_stories_from_extension(stories: list[dict], page_url: str) -> dict:
     return {"saved": len(clean)}
 
 
+PART_EDIT_RE = re.compile(r"/myworks/(\d+)[^/]*/write/(\d+)")
+PART_PUBLIC_RE = re.compile(r"wattpad\.com/(\d+)(?:-[^/?#]*)?/?(?:[?#]|$)")
+
+
+def existing_part(rec: dict, part_url: str = "") -> Optional[dict]:
+    """The Wattpad part a publish must update in place, or None for a new chapter:
+    the pasted link (editor link …/myworks/<story>/write/<part>, or reader link wattpad.com/<part>-ten-chuong),
+    else the part this chapter was successfully published to before. A part only created by a failed attempt is
+    not one (that is a retry of a new chapter). story_id is None when only a reader link is known."""
+    wp = rec.get("wattpad") or {}
+    if part_url.strip():
+        if m := PART_EDIT_RE.search(part_url):
+            return {"story_id": m.group(1), "part_id": m.group(2)}
+        if m := PART_PUBLIC_RE.search(part_url.strip()):
+            same = wp.get("part_id") == m.group(1)
+            return {"story_id": wp.get("story_id") if same else None, "part_id": m.group(1)}
+        raise StateError("Không nhận ra link chương Wattpad. Hãy dán link đọc (https://www.wattpad.com/123456789-ten-chuong) "
+                         "hoặc link soạn thảo (…/myworks/<truyện>/write/<chương>).", code="BAD_PART_LINK")
+    done = [h for h in rec.get("publish_history") or [] if h.get("ok") and h.get("mode") == "publish"
+            and h.get("part_id") and h["part_id"] == wp.get("part_id")]
+    if not done:
+        return None
+    return {"story_id": wp.get("story_id"), "part_id": wp["part_id"], "story_title": done[-1].get("story_title")}
+
+
 def add_manual_story(link: str, title: str = "") -> dict:
     """Add a story from a pasted Wattpad link (…/story/123456789-ten, …/myworks/123456789 or the editor link
     …/myworks/123456789/write/987654321) or a bare id."""
@@ -133,9 +158,11 @@ class PublishService:
 
     def publish(self, pid: str, number: int, *, story_id: str, story_title: str, title: str,
                 mode: str, confirm: bool, countdown: int = 5, batch: Optional[dict] = None,
-                after: Optional[Callable[[dict], None]] = None) -> dict:
+                after: Optional[Callable[[dict], None]] = None, part_url: str = "") -> dict:
         """Publish one chapter. `batch`/`after` are used by publish_batch: batch info shown by the
-        extension, and a callback that receives the final result (also on failure)."""
+        extension, and a callback that receives the final result (also on failure).
+        A chapter already on Wattpad (published before, or `part_url` pasted by the user) updates that part in
+        its own story instead of adding a new one."""
         if batch is None and self.batch_running():
             raise JobBusy("Đang có một đợt đăng nhiều chương chạy. Hãy đợi nó xong hoặc bấm Huỷ đợt đăng.")
         store = self.chapters.store
@@ -146,19 +173,27 @@ class PublishService:
             raise StateError("Tiêu đề chương trống.", code="EMPTY_TITLE")
         if not story_id:
             raise StateError("Chưa chọn truyện trên Wattpad.", code="NO_STORY")
+        target = existing_part(rec, part_url)   # before the status change: a bad link must not mark the chapter ready
         if rec["status"] == Status.REVIEWED.value:
             transition(rec, "ready")
         elif rec["status"] != Status.READY_TO_PUBLISH.value:
             raise StateError(f"Chương đang ở trạng thái {rec['status']}. Cần Preview và đánh dấu 'Đã review' trước khi đăng.",
                              code="INVALID_TRANSITION")
+        if target:          # update in place: the part's own story, whatever story the publish form shows
+            part_id, update = target["part_id"], True
+            if target.get("story_id") and target["story_id"] != story_id:
+                story_id = target["story_id"]
+                story_title = target.get("story_title") or next(
+                    (s["title"] for s in _state().get("stories", []) if s["id"] == story_id), story_id)
+        else:               # new chapter; a retry reuses the part an earlier attempt created
+            wp = rec.get("wattpad") or {}
+            part_id, update = (wp.get("part_id") if wp.get("story_id") == story_id else None), False
         store.save_chapter(pid, number, rec)
-        store.update_project(pid, wattpad={"story_id": story_id, "story_title": story_title})
-
-        wp = rec.get("wattpad") or {}
-        part_id = wp.get("part_id") if wp.get("story_id") == story_id else None
+        if not update:
+            store.update_project(pid, wattpad={"story_id": story_id, "story_title": story_title})
         content_hash = json.dumps(rec["draft"], sort_keys=True)
-        log.info("Starting publish: project=%s chapter=%d story=%s mode=%s reuse_part=%s",
-                 pid, number, story_id, mode, bool(part_id))
+        log.info("Starting publish: project=%s chapter=%d story=%s mode=%s reuse_part=%s update=%s",
+                 pid, number, story_id, mode, bool(part_id), update)
 
         def done(job, result):
             r = self.chapters._require(pid, number)
@@ -179,8 +214,9 @@ class PublishService:
                     entry["docx_error"] = str(e)
                 r = self.chapters._require(pid, number)
                 transition(r, "published")
-                result["message"] = "Đã publish lên Wattpad và lưu DOCX." if "docx" in entry else \
-                    f"Đã publish lên Wattpad, nhưng lưu DOCX thất bại: {entry['docx_error']}"
+                verb = "Đã cập nhật chương trên Wattpad" if update else "Đã publish lên Wattpad"
+                result["message"] = f"{verb} và lưu DOCX." if "docx" in entry else \
+                    f"{verb}, nhưng lưu DOCX thất bại: {entry['docx_error']}"
             elif result.get("ok"):
                 result["message"] = "Đã lưu nháp lên Wattpad (chưa publish)."
             elif result.get("error_code") == "WATTPAD_SESSION_EXPIRED":
@@ -195,9 +231,9 @@ class PublishService:
         if config.WATTPAD_MODE == "extension":
             return self.bridge.create_publish_task(story_id=story_id, story_title=story_title, title=title.strip(),
                                                    blocks=rec["draft"], mode=mode, part_id=part_id, on_done=done,
-                                                   countdown=countdown, batch=batch)
+                                                   countdown=countdown, batch=batch, update=update)
         return self.jobs.start("publish", {"action": "publish", "story_id": story_id, "title": title.strip(),
-                                           "blocks": rec["draft"], "mode": mode, "part_id": part_id},
+                                           "blocks": rec["draft"], "mode": mode, "part_id": part_id, "update": update},
                                timeout=240, on_done=done)
 
     # ------------------------------------------------------------------ batch

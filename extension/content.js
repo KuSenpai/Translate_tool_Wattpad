@@ -326,6 +326,10 @@
   // The story page's own "+ New Part" button is never used: it only adds a blank draft to the list and opens nothing.
   const storyUrl = (task) => cfg.base + cfg.story_path.replace("{story_id}", task.story_id);
   const partUrl = (task, partId) => cfg.base + cfg.part_edit_path.replace("{story_id}", task.story_id).replace("{part_id}", partId);
+  // A navigation was started from this page: stay idle while the next page loads (a background tab can keep the old
+  // page for several ticks), or reopenPart would take a part that is still on Wattpad for deleted.
+  let leftAt = 0;
+  function go(url) { leftAt = Date.now(); location.href = url; }
   const navKey = (task) => "nt_nav_" + task.id;
   const navCount = (task) => +(mem.get(navKey(task)) || 0);
   const bumpNav = (task) => mem.set(navKey(task), String(navCount(task) + 1));
@@ -390,7 +394,7 @@
     }
     bumpNav(task);
     banner("Đang mở trang truyện…", true, () => cancel(task));
-    location.href = storyUrl(task);
+    go(storyUrl(task));
   }
 
   // Story page: open the story's latest part.
@@ -400,7 +404,7 @@
     if (!latest) return fail(task, "WATTPAD_UI_CHANGED", "Không thấy danh sách chương trên trang truyện của Wattpad.");
     if (!(await stillCurrent(task))) return aborted(task);
     await event(task, { message: `Mở chương mới nhất (“${latest.text}”)…` });
-    location.href = latest.url;
+    go(latest.url);
   }
 
   // Editor of a part we do not own yet: decide what to do from the part's state.
@@ -415,7 +419,7 @@
       if (navCount(task) >= 3) return fail(task, "WATTPAD_UI_CHANGED", "Không mở được chương mới nhất của truyện trên Wattpad.");
       bumpNav(task);
       await event(task, { message: `Đang chuyển tới chương mới nhất (“${latest.text}”)…` });
-      location.href = latest.url;
+      go(latest.url);
       return;
     }
     const { state, words } = partState();
@@ -714,7 +718,7 @@
     bumpNav(task);
     banner("Đang mở lại phần đã tạo trước đó…", true, () => cancel(task));
     await event(task, { stage: "pending" }); // the content is filled in again once the part is open
-    location.href = partUrl(task, task.part_id);
+    go(partUrl(task, task.part_id));
   }
 
   // ------------------------------------------------------------------ read old chapters (termbase scan task)
@@ -775,7 +779,7 @@
   }
 
   async function tick() {
-    if (busy) return;
+    if (busy || Date.now() - leftAt < 30000) return;
     busy = true;
     try {
       if (!cfg) {

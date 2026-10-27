@@ -31,7 +31,7 @@ def run(cmd: dict) -> dict:
             return wp.list_stories()
         if action == "publish":
             return wp.publish(story_id=str(cmd["story_id"]), title=cmd["title"], blocks=cmd["blocks"],
-                              mode=cmd.get("mode", "publish"), part_id=cmd.get("part_id"))
+                              mode=cmd.get("mode", "publish"), part_id=cmd.get("part_id"), update=bool(cmd.get("update")))
     raise WattpadError("WATTPAD_BAD_COMMAND", f"Unknown action: {action}")
 
 
