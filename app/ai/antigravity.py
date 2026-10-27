@@ -44,7 +44,8 @@ _RATE = re.compile(r"\b429\b|\b503\b|rate[ -]?limit|overloaded|unavailable|try a
 _SAFETY = re.compile(r"safety|prohibited[_ ]content|blocked|recitation|blocklist|harm[_ ]category|policy", re.IGNORECASE)
 _BAD_MODEL = re.compile(r"unknown model|model .*not (?:found|available|supported)|invalid model", re.IGNORECASE)
 _SLUG = re.compile(r"\b((?:gemini|claude|gpt)-[a-z0-9.\-]*\d[a-z0-9.\-]*)", re.IGNORECASE)
-_INTERRUPTED = re.compile(r"stream was interrupted|connection (?:reset|closed)|unexpected eof", re.IGNORECASE)
+_INTERRUPTED = re.compile(r"stream was interrupted|connection (?:was )?(?:reset|closed|aborted|refused)|forcibly closed|unexpected eof|"
+                          r"wsarecv|wsasend|broken pipe|i/o timeout|tls handshake timeout|no such host", re.IGNORECASE)
 _EFFORT_SUFFIX = re.compile(r"-(high|medium|low)$")
 _HANGUL = re.compile(r"[가-힣]")
 
@@ -274,6 +275,8 @@ def _parse_json(text: str):
 def _map_error(text: str, status_: str, returncode: int, usage: dict, refusal_message: str) -> LLMError:
     from .novel_translator import LLMRefused
     short = re.sub(r"\s+", " ", text)[:300] or f"không có phản hồi (mã {returncode}, trạng thái {status_ or '?'})"
+    if _INTERRUPTED.search(text):       # first: the half-written answer in `text` may contain words like "blocked"
+        return LLMTimeout(f"Mất kết nối tới Gemini giữa chừng: {short[:150]}")
     if _BAD_MODEL.search(text):
         return LLMError(f"Model Antigravity không hợp lệ: {short}. Xem danh sách bằng  agy models  và đặt "
                         "ANTIGRAVITY_MODEL_PRO / ANTIGRAVITY_MODEL_FLASH trong .env.", code="AI_BAD_MODEL")

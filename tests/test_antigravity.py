@@ -134,10 +134,16 @@ def test_interrupted_stream_is_asked_again_once(monkeypatch):
     fake_agy(monkeypatch, [(cut, "", 1), (result_line(structured_output=GOOD), "", 0)], seen)
     data, _, _ = AntigravityJSON("antigravity:pro").call(system="s", user="u", schema=SCHEMA)
     assert data == GOOD and len(seen) == 2
-    fake_agy(monkeypatch, [(cut, "", 1), (cut, "", 1)])                     # twice in a row: reported, not looped
+    fake_agy(monkeypatch, [(cut, "", 1), (cut, "", 1)])                     # twice in a row: raised as retryable, not looped
     with pytest.raises(Exception) as e:
         AntigravityJSON("antigravity:pro").call(system="s", user="u", schema=SCHEMA)
-    assert e.value.code == "ANTIGRAVITY_ERROR"
+    assert e.value.code == "AI_TIMEOUT"
+    drop = result_line(status="ERROR", error='API error (attempt 1): request failed: Post "https://x/v1internal:streamGenerateContent": '
+                       "read tcp 1.2.3.4:61630->5.6.7.8:443: wsarecv: An established connection was aborted by the software "
+                       "in your host machine.", response='{"heading": "2961. Atlantis bị blocked')
+    seen = []
+    fake_agy(monkeypatch, [(drop, "", 1), (result_line(structured_output=GOOD), "", 0)], seen)
+    assert AntigravityJSON("antigravity:pro").call(system="s", user="u", schema=SCHEMA)[0] == GOOD and len(seen) == 2
 
 
 @pytest.mark.parametrize("out,err,rc,exc,code", [

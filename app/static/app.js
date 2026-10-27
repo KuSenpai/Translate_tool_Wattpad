@@ -514,12 +514,15 @@ function renderRetransSummary() {
     <div class="rt-ok">✔ Đã ${r.consistency?.revised ? "sửa" : "dịch"} xong chương ${r.number}</div>
     ${mismatch ? `<div class="alert error">Số đoạn lệch: Hàn ${r.paragraph_count.source} ≠ kết quả ${r.paragraph_count.result}.</div>` : ""}
     <div class="muted small">${line}</div>
+    ${r.applied ? `<div class="muted small">✔ Đã thay bản Việt bằng bản dịch lại (Ctrl+Z / Undo để hoàn tác, Save Draft để lưu).</div>` : ""}
+    ${r.backup ? `<div class="muted small">💾 Bản cũ (${r.backup.blocks.length} đoạn) vẫn được giữ — bấm ↩ để đưa lại vào editor.</div>` : ""}
     <label class="check"><input type="checkbox" class="rt-title-cb" ${S.rtWithTitle === false ? "" : "checked"}> Cập nhật cả tiêu đề</label>
     <div class="rt-btns">
-      <button class="primary" data-rt="apply" title="Thay ngay bản đang sửa bằng bản dịch lại (Undo được)">⚡ Thay bản hiện tại</button>
+      <button class="primary" data-rt="apply" title="Thay ngay bản đang sửa bằng bản dịch lại (Undo được)">⚡ ${r.applied ? "Thay lại" : "Thay bản hiện tại"}</button>
+      ${r.backup ? `<button data-rt="restore" title="Đưa bản trước khi thay trở lại editor (Undo được)">↩ Khôi phục bản cũ</button>` : ""}
       <button data-rt="copy">📋 Copy</button>
       <button data-rt="open">🔎 Xem / so sánh</button>
-      <button class="ghost" data-rt="dismiss">Bỏ qua</button>
+      <button class="ghost" data-rt="dismiss" title="Ẩn kết quả${r.backup ? " và bản cũ" : ""}">Bỏ qua</button>
     </div></div>`;
   $("#rtResult").querySelectorAll("[data-rt]").forEach((b) => b.addEventListener("click", () => retransAction(b.dataset.rt)));
   bindTitleCb($("#rtResult"));
@@ -537,16 +540,20 @@ function retransAction(act) {
   else if (act === "copy") copyText(blocksText(r.blocks).join("\n\n"), `Đã copy bản dịch (${r.blocks.length} đoạn)`);
   else if (act === "copy-title") copyText(r.title, "Đã copy tiêu đề");
   else if (act === "open") openRetransDialog();
+  else if (act === "restore") restoreBackup();
   else if (act === "dismiss") { S.retrans = null; $("#rtDialog").close(); $("#rtResult").innerHTML = `<div class="muted small">Đã bỏ qua bản dịch lại.</div>`; }
 }
 
 function renderRetransDialog() {
   const r = S.retrans; if (!r) return;
   const { mismatch, line } = retransStats(r);
+  $("#rtCompare").querySelector('[value="backup"]').hidden = !r.backup;
+  $("#rtDlgRestore").classList.toggle("hidden", !r.backup);
+  if (!r.backup && $("#rtCompare").value === "backup") $("#rtCompare").value = "draft";
   const mode = $("#rtCompare").value;
-  const old = mode === "draft" ? blocksText(editorToBlocks(ed())) : mode === "ko" ? blocksText(S.chapter.ko_blocks) : null;
+  const old = mode === "draft" ? editorToBlocks(ed()) : mode === "ko" ? S.chapter.ko_blocks : mode === "backup" ? r.backup.blocks : null;
   $("#rtDlgTitle").textContent = `Bản dịch lại — chương ${r.number}`;
-  $("#rtDlgSub").innerHTML = line;
+  $("#rtDlgSub").innerHTML = line + rtChangedNote(r);
   $("#rtDlgTitleCb").checked = S.rtWithTitle !== false;
   const curTitle = $("#titleInput").value.trim();
   const head = `${mismatch ? `<div class="alert error">Số đoạn lệch: bản Hàn ${r.paragraph_count.source}, kết quả ${r.paragraph_count.result}. Xem kỹ trước khi thay.</div>` : ""}
@@ -556,19 +563,50 @@ function renderRetransDialog() {
       ${r.new_terms?.length ? `<h5>Thuật ngữ mới AI dùng</h5><div class="reason">${r.new_terms.map((t) => `${esc(t.source)} → ${esc(t.target)}`).join("<br>")}</div>` : ""}</div></details>`;
   const n = old ? Math.max(old.length, r.blocks.length) : r.blocks.length;
   let rows = "";
+  // The new translation (and the backup) can be edited right here; ⇄ swaps a row with the backup, ⇐ takes the draft's row.
+  const swap = { backup: ["⇄", "Đổi chỗ 2 dòng này (bấm lần nữa để đổi lại)"], draft: ["⇐", "Lấy dòng bên trái thay cho dòng bản mới"] }[mode];
   for (let i = 0; i < n; i++) {
-    const b = r.blocks[i];
-    rows += `<div class="rt-row ${old ? "two" : ""}">${old ? `<div class="rt-cell old ${mode === "ko" ? "ko" : ""}">${old[i] != null ? esc(old[i]) : ""}</div>` : ""}
-      <div class="rt-cell new"><span class="rt-n">${i + 1}</span>${b ? blocksHtml([b]) : ""}${b ? `<button class="rt-copy ghost small" data-i="${i}" title="Copy đoạn này">📋</button>` : ""}</div></div>`;
+    const b = r.blocks[i], lb = old?.[i];
+    rows += `<div class="rt-row ${old ? "two" : ""}">${old ? `<div class="rt-cell old ${mode === "ko" ? "ko" : ""}"><div class="rt-edit" data-side="old" data-i="${i}"
+        ${mode === "backup" && lb ? 'contenteditable="true"' : ""}>${lb ? blocksHtml([lb]) : ""}</div></div>` : ""}
+      <div class="rt-cell new"><span class="rt-n">${i + 1}</span>${b ? `<div class="rt-edit" data-side="new" data-i="${i}" contenteditable="true">${blocksHtml([b])}</div>
+        <button class="rt-copy ghost small" data-i="${i}" title="Copy đoạn này">📋</button>` : ""}
+        ${b && lb && swap ? `<button class="rt-swap ghost small" data-i="${i}" title="${swap[1]}">${swap[0]}</button>` : ""}</div></div>`;
   }
-  const colHead = old ? `<div class="rt-row two rt-colhead"><div>${mode === "ko" ? "Bản Hàn" : "Bản đang sửa"}</div><div>Bản dịch mới</div></div>` : "";
-  $("#rtDlgBody").innerHTML = head + colHead + rows;
-  $("#rtDlgBody").querySelectorAll(".rt-copy").forEach((b) => b.addEventListener("click", () => {
+  const colHead = old ? `<div class="rt-row two rt-colhead"><div>${{ ko: "Bản Hàn", backup: "Bản cũ (trước khi thay)" }[mode] || "Bản đang sửa"}</div><div>Bản dịch mới (sửa trực tiếp được)</div></div>` : "";
+  const body = $("#rtDlgBody");
+  body.innerHTML = head + colHead + rows;
+  body.querySelectorAll(".rt-copy").forEach((b) => b.addEventListener("click", () => {
     const i = +b.dataset.i; copyText(blocksText(r.blocks)[i], `Đã copy đoạn ${i + 1}`);
   }));
+  body.querySelectorAll(".rt-edit[contenteditable]").forEach((el) => {
+    el.addEventListener("keydown", (ev) => { if (ev.key === "Enter" && !ev.shiftKey) ev.preventDefault(); });   // one row = one paragraph
+    el.addEventListener("input", () => {
+      const arr = el.dataset.side === "new" ? r.blocks : r.backup.blocks, i = +el.dataset.i, runs = [];
+      collectRuns(el, { b: false, i: false, u: false }, runs);     // pasted paragraphs become line breaks inside the row
+      arr[i] = { ...arr[i], runs: normalizeRuns(runs) };
+      rtMarkChanged(r);
+    });
+  });
+  body.querySelectorAll(".rt-swap").forEach((btn) => btn.addEventListener("click", () => {
+    const i = +btn.dataset.i, row = btn.closest(".rt-row");
+    if (mode === "backup") [r.blocks[i], r.backup.blocks[i]] = [r.backup.blocks[i], r.blocks[i]];
+    else r.blocks[i] = structuredClone(old[i]);
+    row.querySelector('[data-side="new"]').innerHTML = blocksHtml([r.blocks[i]]);
+    if (mode === "backup") row.querySelector('[data-side="old"]').innerHTML = blocksHtml([r.backup.blocks[i]]);
+    rtMarkChanged(r);
+  }));
+}
+function rtChangedNote(r) {
+  return r.changed && r.applied ? ` · <b class="rt-changed">đã sửa sau khi thay — bấm ⚡ Thay bản hiện tại để đưa vào editor</b>` : "";
+}
+function rtMarkChanged(r) {
+  r.changed = true;
+  $("#rtDlgSub").innerHTML = retransStats(r).line + rtChangedNote(r);
 }
 function openRetransDialog() {
   if (!S.retrans) return;
+  if (S.retrans.applied) $("#rtCompare").value = "backup";   // after a replace the editor already holds the new text
   renderRetransDialog();
   if (!$("#rtDialog").open) $("#rtDialog").showModal();
 }
@@ -577,14 +615,29 @@ function applyRetranslation({ save = false } = {}) {
   const r = S.retrans;
   if (!r || !S.chapter || S.chapter.number !== r.number) return;
   if (H.timer) snapshot();
+  if (!r.applied) r.backup = { blocks: editorToBlocks(ed()), title: $("#titleInput").value };   // kept even after Undo
   ed().innerHTML = blocksHtml(r.blocks) || "<p><br></p>";
   if (S.rtWithTitle !== false) $("#titleInput").value = r.title;
   snapshot(); setDirty(true);
   $("#viMeta").textContent = `${S.chapter.vi_heading || ""} · ${r.blocks.length} đoạn`;
-  S.retrans = null;
+  r.applied = true; r.changed = false;
   $("#rtDialog").close();
-  $("#rtResult").innerHTML = `<div class="muted small">✔ Đã thay bản Việt bằng bản dịch lại (Ctrl+Z / Undo để hoàn tác${save ? "" : ", Save Draft để lưu"}).</div>`;
+  renderRetransSummary();
   if (save) saveDraft(); else toast("Đã thay bản Việt bằng bản dịch lại — Undo để hoàn tác", "ok");
+}
+
+function restoreBackup() {
+  const r = S.retrans, b = r?.backup;
+  if (!b || !S.chapter || S.chapter.number !== r.number) return;
+  if (H.timer) snapshot();
+  ed().innerHTML = blocksHtml(b.blocks) || "<p><br></p>";
+  $("#titleInput").value = b.title;
+  snapshot(); setDirty(true);
+  $("#viMeta").textContent = `${S.chapter.vi_heading || ""} · ${b.blocks.length} đoạn`;
+  r.applied = false;
+  $("#rtDialog").close();
+  renderRetransSummary();
+  toast("Đã khôi phục bản cũ — bản dịch lại vẫn còn ở tab AI", "ok");
 }
 
 // ---------------------------------------------------------------- automatic chapter title by story arc
