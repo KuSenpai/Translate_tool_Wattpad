@@ -96,6 +96,18 @@
     return null;
   }
 
+  // Select the whole content of `el` itself. execCommand("selectAll") acts on whichever field still holds the caret:
+  // in a background tab focus() may leave it in the title, and the chapter text then replaced the title.
+  function selectIn(el) {
+    el.focus();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  const fieldText = (el) => norm(el.tagName === "INPUT" || el.tagName === "TEXTAREA" ? el.value : el.innerText);
+
   function setTitle(el, value) {
     el.focus();
     if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
@@ -104,12 +116,15 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else {
-      document.execCommand("selectAll", false);
+      selectIn(el);
       document.execCommand("insertText", false, value);
       if (norm(el.innerText) !== norm(value)) el.textContent = value;
     }
-    // Wattpad copies the title into its own model on key/blur events. In a background tab focus()/blur() fire no
-    // events, so the text sat in the page while Wattpad saved "Untitled Part N": send the events ourselves.
+    notifyEdited(el);
+  }
+  // Wattpad copies a field into its own model on key/blur events. In a background tab focus()/blur() fire no events,
+  // so the text sat in the page while Wattpad saved "Untitled Part N" (title) or republished the old text (body).
+  function notifyEdited(el) {
     for (const type of ["input", "keyup", "change"]) el.dispatchEvent(new Event(type, { bubbles: true }));
     el.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
     el.dispatchEvent(new FocusEvent("blur"));
@@ -121,8 +136,7 @@
       && Math.abs(got.length - want.length) <= Math.max(20, want.length / 50);
   }
   function insertBody(el, html, text) {
-    el.focus();
-    document.execCommand("selectAll", false);
+    selectIn(el);
     document.execCommand("delete", false);
     const dt = new DataTransfer();
     dt.setData("text/html", html);
@@ -527,6 +541,36 @@
     } catch { return null; }
   }
 
+  // The text Wattpad now serves to readers of the part; null when it cannot be read.
+  async function publishedText(partId) {
+    try {
+      const j = await getJson(`/v4/parts/${partId}?fields=text_url`);
+      const r = await fetch(j.text_url.text, { cache: "no-store" });
+      if (!r.ok) return null;
+      return new DOMParser().parseFromString(await r.text(), "text/html").body.textContent;
+    } catch { return null; }
+  }
+  const squash = (s) => (s || "").normalize("NFC").replace(/\s+/g, "");
+  // "Publish changes" republishes whatever Wattpad has in its model - the OLD text when the pasted one never reached
+  // it - and still looks like a success. So an update is only done once readers get the new text.
+  async function updateLanded(task) {
+    const want = squash(task.text);
+    for (let i = 0; i < 5; i++) {
+      const got = await publishedText(task.part_id);
+      if (got == null) return true; // cannot tell: never blocks
+      const g = squash(got);
+      if (g.includes(want.slice(0, 60)) && g.includes(want.slice(-60))) return true;
+      await sleep(3000);
+    }
+    return false;
+  }
+  async function published(task, message) {
+    if (task.update && !(await updateLanded(task))) return fail(task, "WATTPAD_CONTENT_NOT_SAVED",
+      "Đã bấm Publish nhưng Wattpad vẫn hiển thị nội dung CŨ của chương này (nội dung mới chưa được Wattpad nhận). "
+      + "Hãy để tab Wattpad ở phía trước rồi đăng lại chương này.");
+    return finish(task, { ok: true, published: true, message });
+  }
+
   async function fill(task, partId) {
     await event(task, { stage: "filling", part_id: partId, message: "Đang điền tiêu đề và nội dung…" });
     banner("Đang điền tiêu đề và nội dung…", true, () => cancel(task));
@@ -535,17 +579,24 @@
     const body = await waitFor(() => findBody(title));
     if (!body) return fail(task, "WATTPAD_UI_CHANGED", "Không tìm thấy vùng soạn nội dung.");
     if (!(await stillCurrent(task))) return aborted(task); // cancelled in the tool: do not touch the editor
+    await front();
     setTitle(title, task.title);
     await sleep(300);
     insertBody(body, task.html, task.text);
     await sleep(800);
     if (!bodyMatches(body, task.text)) { // plain-text fallback
-      body.focus();
-      document.execCommand("selectAll", false);
+      selectIn(body);
       document.execCommand("insertText", false, task.text);
       await sleep(800);
       if (!bodyMatches(body, task.text)) return fail(task, "WATTPAD_PUBLISH_FAILED", "Không chèn được nội dung vào editor Wattpad.");
     }
+    if (fieldText(title) !== norm(task.title)) { // the text went (partly) into the title: put the title back first
+      setTitle(title, task.title);
+      await sleep(300);
+      if (fieldText(title) !== norm(task.title)) return fail(task, "WATTPAD_TITLE_CLOBBERED",
+        "Ô tiêu đề trên Wattpad bị thay đổi khi điền nội dung, nên chưa lưu và chưa bấm Publish. Hãy kiểm tra lại chương này.");
+    }
+    notifyEdited(body);
     await saveNow();
     for (let i = 0; ; i++) { // the title Wattpad itself has stored, not what the page shows
       const got = await savedTitle(task, partId);
@@ -578,10 +629,11 @@
       || byText(cfg.selectors.publish_texts, document, { enabledOnly: true }), 15000);
     if (!btn) {
       if (byText(cfg.selectors.unpublish_texts)) { // already live: the content was just updated and saved
-        return finish(task, { ok: true, published: true, message: "Phần này đã được đăng sẵn; nội dung đã cập nhật." });
+        return published(task, "Phần này đã được đăng sẵn; nội dung đã cập nhật.");
       }
       return fail(task, "WATTPAD_UI_CHANGED", "Không tìm thấy nút Publish / Xuất bản (hoặc nút đang bị khoá).");
     }
+    await front();
     const anchor = anchorOf(btn);
     const before = new Set(clickables());
     const beforeRoots = new Set(popupRoots(anchor));
@@ -606,7 +658,7 @@
   // After Publish was clicked: confirm any popup (one or more steps) and decide whether the part is live.
   async function settle(task, anchor, before, beforeRoots, ms) {
     const end = Date.now() + ms;
-    const ok = () => finish(task, { ok: true, published: true, message: "Đã đăng lên Wattpad." });
+    const ok = () => published(task, "Đã đăng lên Wattpad.");
     let clicks = 0, goneSince = 0, noButtonSince = 0;
     // The baseline (`before`, `beforeRoots`) stays what it was before Publish was clicked, so a second popup that
     // appears right after the first one closes still counts as new. A button is never clicked twice with the same label.
@@ -657,11 +709,19 @@
     await finish(task, { ok: false, error_code: "CANCELLED", message: "Bạn đã huỷ trên Wattpad." });
   }
 
+  // Browsers throttle a background tab: Wattpad then republished the old text, or ignored the Publish click.
+  async function front() {
+    if (!document.hidden) return;
+    await send({ type: "focus" });
+    await waitFor(() => !document.hidden, 5000);
+  }
+
   async function runTask(task) {
     const path = location.pathname;
     const partId = writePartId();
     bannerPrefix = task.batch ? `[${task.batch.index}/${task.batch.total}] ` : "";
-    if (document.hidden && !hiddenNoticeSent.has(task.id)) { // browsers slow down / freeze the page of a background tab
+    await front();
+    if (document.hidden && !hiddenNoticeSent.has(task.id)) {
       hiddenNoticeSent.add(task.id);
       await event(task, { message: "Tab Wattpad đang ở chế độ nền — hãy chuyển sang tab đó (đừng thu nhỏ cửa sổ) để việc đăng chạy ổn định." });
     }
@@ -669,7 +729,7 @@
     if (task.stage === "publishing") { // Publish was clicked; we are on the page after it (or the editor still)
       if (partId) return settle(task, null, new Set(clickables()), new Set(), 15000);
       const at = +(mem.get("nt_pub_" + task.id) || 0);
-      if (Date.now() - at < 120000) return finish(task, { ok: true, published: true, message: "Đã đăng lên Wattpad." });
+      if (Date.now() - at < 120000) return published(task, "Đã đăng lên Wattpad.");
       return fail(task, "WATTPAD_PUBLISH_FAILED", "Không xác nhận được kết quả đăng (trang đã đổi sau khi bấm Publish). "
         + "Hãy kiểm tra trên Wattpad trước khi thử lại.");
     }

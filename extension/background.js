@@ -31,6 +31,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "stories": return call("/api/ext/stories", "POST", msg.data);
       case "diag": return call("/api/ext/diag", "POST", msg.data);
       case "novelpia": return call("/api/ext/novelpia", "POST", msg.data);
+      case "focus": { // a background tab is throttled: Wattpad then republished the old text or ignored Publish
+        const tab = _sender.tab;
+        if (!tab) return { ok: false };
+        const win = await chrome.windows.get(tab.windowId);
+        await chrome.windows.update(tab.windowId, win.state === "minimized" ? { state: "normal", focused: true } : { focused: true });
+        await chrome.tabs.update(tab.id, { active: true });
+        return { ok: true };
+      }
       case "getApp": return { app: await appBase() };
       case "setApp": await chrome.storage.local.set({ app: msg.app }); return { ok: true };
       default: throw new Error("unknown message " + msg.type);

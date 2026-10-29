@@ -58,6 +58,8 @@ def env(tmp_root):
 
     def bridge(raw: str) -> str:
         msg = json.loads(raw)
+        if msg["type"] == "focus":                # background.js brings the tab to the front; the test page always is
+            return json.dumps({"ok": True, "data": {"ok": True}})
         method, path = routes.get(msg["type"], ("POST", f"/api/ext/task/{msg.get('id')}/event"))
         if msg["type"] == "task":
             path += "?tab=" + quote(msg.get("tab") or "")
@@ -499,6 +501,39 @@ def test_edited_published_chapter_updates_its_own_part(env, client, book, fake):
     assert part["published"] and part["title"] == "Chương 12 (sửa)" and "Đoạn đã sửa lại." in part["text"]
     ch = client.get(f"/api/projects/{pid}/chapters/12").json()
     assert ch["status"] == "PUBLISHED" and ch["publish_history"][-1]["story_id"] == "111"
+
+
+def test_text_never_lands_in_the_title(env, client, book, fake):
+    """In a background tab the caret can stay in the title after it was filled: "select all + paste" then put the
+    whole chapter into the title. The text must go into the editor and the title stay the chapter title."""
+    page = env["page"]
+    fake.focus_stuck = True
+    old = fake.existing_part("111")
+    pid = ready(client, book, 11, "ext-focus-stuck.docx")
+    job = client.post(f"/api/projects/{pid}/chapters/11/publish", json={
+        "story_id": "111", "title": "Chương 11", "mode": "publish", "confirm": True,
+        "part_url": f"{fake.base}/myworks/111/write/{old}"}).json()
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page)
+    assert j["state"] == "done", j
+    assert fake.old[old]["title"] == "Chương 11" and "Hết chương 11." in fake.old[old]["text"]
+
+
+def test_update_that_left_the_old_text_online_is_a_failure(env, client, book, fake):
+    """"Publish changes" republishes the old text when Wattpad never took the pasted one; that must not be reported
+    as an update and the chapter must not be marked published."""
+    page = env["page"]
+    fake.stale_update = True
+    old = fake.existing_part("111")
+    pid = ready(client, book, 11, "ext-stale-update.docx")
+    job = client.post(f"/api/projects/{pid}/chapters/11/publish", json={
+        "story_id": "111", "title": "Chương 11", "mode": "publish", "confirm": True,
+        "part_url": f"{fake.base}/myworks/111/write/{old}"}).json()
+    page.goto(job["open_url"])
+    j = wait_job(client, job["id"], page, timeout=120)
+    assert j["state"] == "error" and j["error_code"] == "WATTPAD_CONTENT_NOT_SAVED", j
+    assert fake.old[old]["text"] == fake.OLD_TEXT
+    assert status_of(client, pid, 11) != "PUBLISHED"
 
 
 def test_pasted_link_updates_a_chapter_published_outside_the_tool(env, client, book, fake):

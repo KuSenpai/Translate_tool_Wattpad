@@ -44,6 +44,8 @@ class FakeWattpad:
         self.trusted_new_part = False           # the editor's New Part ignores script-made clicks (only a real mouse works)
         self.title_model = False                # the editor takes the title into its model on key events only
         self.title_locked = False               # saving never changes a part's title (it stays "Untitled Part N")
+        self.focus_stuck = False                # background tab: once the title has focus, focus()/blur() do nothing
+        self.stale_update = False               # "Publish changes" on a published part republishes its old text
         self.trap_clicks = 0                    # presses of the story page's "+ New Part" (it opens nothing)
         self.existing: dict[str, str] = {}      # story id -> id of the first pre-existing (published) chapter
         self.old: dict[str, dict] = {}          # chapters that existed before the test (`parts` only holds new ones)
@@ -66,7 +68,7 @@ class FakeWattpad:
         self.trap_clicks = 0
         self.flaky_failures = {"333": 1}
         self.confirm_style, self.frozen_menu, self.trusted_new_part = "native", False, False
-        self.title_model = self.title_locked = False
+        self.title_model = self.title_locked = self.focus_stuck = self.stale_update = False
 
     def find(self, pid: str):
         return self.old.get(pid) or self.parts.get(pid)
@@ -140,6 +142,13 @@ class FakeWattpad:
                     parts = [{"id": int(p), "title": fake.find(p)["title"], "draft": not fake.find(p)["published"]}
                              for p in fake.order.get(m.group(1), [])]
                     return self._send(200, json.dumps({"parts": parts}), "application/json")
+                m = re.fullmatch(r"/v4/parts/(\d+)", path)     # where readers get the part's published text
+                if m and fake.find(m.group(1)):
+                    return self._send(200, json.dumps({"text_url": {"text": f"{fake.base}/parttext/{m.group(1)}"}}),
+                                      "application/json")
+                m = re.fullmatch(r"/parttext/(\d+)", path)
+                if m and fake.find(m.group(1)):
+                    return self._send(body=fake.find(m.group(1))["html"])
                 if path.startswith("/myworks") and not self._logged_in():
                     return self._redirect("/")
                 if path == "/myworks":
@@ -182,6 +191,7 @@ class FakeWattpad:
                                           .replace("__PART__", m.group(2)).replace("__STORY__", part["story"])
                                           .replace("__CONFIRM__", fake.confirm_style)
                                           .replace("__TITLE_MODEL__", "true" if fake.title_model else "false")
+                                          .replace("__FOCUS_STUCK__", "true" if fake.focus_stuck else "false")
                                           .replace("__TRUSTED__", "true" if fake.trusted_new_part else "false")
                                           .replace("__FROZEN__", "visibility:hidden" if fake.frozen_menu else ""))
                     return self._send(body=EDITOR.replace("__PART__", m.group(2)))
@@ -204,7 +214,8 @@ class FakeWattpad:
                 if not m or fake.find(m.group(2)) is None or not self._logged_in():
                     return self._send(403, "{}", "application/json")
                 part = fake.find(m.group(2))
-                part.update(html=body["html"], text=body["text"])
+                if not (fake.stale_update and part["published"]):
+                    part.update(html=body["html"], text=body["text"])
                 if not fake.title_locked:
                     part["title"] = body["title"]
                 if m.group(1) == "publish":
@@ -280,6 +291,11 @@ EDITOR_MODERN = """<!doctype html><html><body>
 <div id="toasts"></div>
 <script>
 const story = "__STORY__", CONFIRM = "__CONFIRM__", TRUSTED = __TRUSTED__, TITLE_MODEL = __TITLE_MODEL__;
+if (__FOCUS_STUCK__) {   // the caret stays in whatever got focus first (the title)
+  const focus = HTMLElement.prototype.focus;
+  HTMLElement.prototype.focus = function () { if (document.activeElement === document.body) focus.call(this); };
+  HTMLElement.prototype.blur = function () {};
+}
 let part = "__PART__";
 const parts = __ROWS__;
 const $ = (s) => document.querySelector(s);
