@@ -550,7 +550,9 @@
       return new DOMParser().parseFromString(await r.text(), "text/html").body.textContent;
     } catch { return null; }
   }
-  const squash = (s) => (s || "").normalize("NFC").replace(/\s+/g, "");
+  // Wattpad stores typographic quotes and ellipses as plain ASCII ("…" -> "..."), so compare them that way.
+  const squash = (s) => (s || "").normalize("NFC").replace(/[“”„‟]/g, '"').replace(/[‘’‚‛]/g, "'")
+    .replace(/…/g, "...").replace(/\s+/g, "");
   // "Publish changes" republishes whatever Wattpad has in its model - the OLD text when the pasted one never reached
   // it - and still looks like a success. So an update is only done once readers get the new text.
   async function updateLanded(task) {

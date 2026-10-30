@@ -488,7 +488,7 @@ def test_edited_published_chapter_updates_its_own_part(env, client, book, fake):
     assert wait_job(client, job["id"], page)["state"] == "done"
     part_id = client.get(f"/api/projects/{pid}/chapters/12").json()["wattpad"]["part_id"]
 
-    edit_and_review(client, pid, 12, "Đoạn đã sửa lại.")
+    edit_and_review(client, pid, 12, "‘Đoạn đã sửa lại…’")          # Wattpad stores these quotes as plain ASCII
     before = set(fake.parts)
     job = publish_one(client, pid, 12, "222", "Chương 12 (sửa)")               # another story picked in the form
     assert job["open_url"] == f"{fake.base}/myworks/111/write/{part_id}"
@@ -498,7 +498,7 @@ def test_edited_published_chapter_updates_its_own_part(env, client, book, fake):
     assert "cập nhật" in j["result"]["message"]
     assert set(fake.parts) == before and part_id not in fake.order.get("222", [])   # nothing new, nowhere else
     part = fake.parts[part_id]
-    assert part["published"] and part["title"] == "Chương 12 (sửa)" and "Đoạn đã sửa lại." in part["text"]
+    assert part["published"] and part["title"] == "Chương 12 (sửa)" and "‘Đoạn đã sửa lại…’" in part["text"]
     ch = client.get(f"/api/projects/{pid}/chapters/12").json()
     assert ch["status"] == "PUBLISHED" and ch["publish_history"][-1]["story_id"] == "111"
 

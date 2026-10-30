@@ -148,7 +148,9 @@ class FakeWattpad:
                                       "application/json")
                 m = re.fullmatch(r"/parttext/(\d+)", path)
                 if m and fake.find(m.group(1)):
-                    return self._send(body=fake.find(m.group(1))["html"])
+                    plain = (fake.find(m.group(1))["html"].replace("“", '"').replace("”", '"')
+                             .replace("‘", "'").replace("’", "'").replace("…", "..."))   # as Wattpad stores it
+                    return self._send(body=plain)
                 if path.startswith("/myworks") and not self._logged_in():
                     return self._redirect("/")
                 if path == "/myworks":
