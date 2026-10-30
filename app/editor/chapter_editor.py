@@ -121,7 +121,7 @@ class ChapterService:
             rec = self.store.get_chapter(pid, n)
             if rec and rec.get("manual"):
                 chapters.append({"number": n, "confidence": "high", "has_ko": bool(rec["ko_blocks"]),
-                                 "has_vi": bool(rec["original_vi"]), "manual": True, "warnings": [],
+                                 "has_vi": bool(rec["original_vi"] or rec["draft"]), "manual": True, "warnings": [],
                                  "title": rec.get("vi_title", ""), "status": rec["status"]})
         chapters.sort(key=lambda c: c["number"])
         missing, gap = missing_warning([c["number"] for c in chapters])

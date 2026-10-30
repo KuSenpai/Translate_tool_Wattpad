@@ -21,7 +21,7 @@ from ..editor.glossary import entries_for_text, glossary_prompt
 from ..editor.validation import validate_translation
 from ..errors import AppError, ChapterError
 from ..logging_setup import get_logger
-from ..storage.project_state import store
+from ..storage.project_state import _read_json, store
 from .chunked import REFUSED_MARK, translate_parallel
 from .consistency import with_examples
 from .llm_service import LLMError
@@ -78,6 +78,48 @@ def _glossary_context(pid: str, korean: str) -> tuple[str, list[dict], int]:
     return text, entries, len(hints)
 
 
+EN_SOURCE_STYLE = ("\n- NGUỒN CHƯƠNG NÀY LÀ BẢN DỊCH TIẾNG ANH của nguyên tác tiếng Hàn (không có bản Hàn). Dịch sang tiếng Việt như dịch"
+                   " từ bản Hàn: tên riêng, chiêu thức, danh hiệu, địa danh theo đúng glossary (cột trái là cách bản tiếng Anh gọi),"
+                   " không giữ cách gọi tiếng Anh khi glossary đã có bản Việt; tên người Hàn viết theo glossary / phiên âm chuẩn"
+                   " (Lee Yeon-hee…). Tiếng Anh không có kính ngữ: chọn xưng hô theo quan hệ nhân vật, ghi chú truyện và các câu"
+                   " mẫu của chương trước, không dịch máy móc I/you thành tôi/bạn. Trong new_terms, source là cách gọi tiếng Anh.")
+_LATIN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .'\-]{2,}$")
+
+
+def en_bridge_path(pid: str):
+    """English names of the story's glossary terms: {"aliases": {korean: {"en", "votes"}}, "extra": [{source(en), target}]}."""
+    return store._glossary_file(pid).with_name("glossary_en.json")
+
+
+def _name_pattern(name: str) -> re.Pattern:
+    # “Lee Yeon-hee” (glossary) must also match “Lee Yeonhee” / “Lee Yeon hee” (English text)
+    return re.compile(r"(?<!\w)" + re.escape(name).replace(r"\-", r"[-\s]?").replace(r"\ ", r"[-\s]?") + r"(?!\w)", re.IGNORECASE)
+
+
+def en_entries(glossary: list[dict], bridge: dict, english: str) -> list[dict]:
+    """Glossary entries that occur in an English text, keyed by their English name: the alias found by aligning earlier
+    Korean / English chapters, or the Vietnamese target itself when it is already a Latin name (Kim Soo-hyun)."""
+    aliases = bridge.get("aliases", {})
+    found: dict[str, tuple[int, dict]] = {}
+    for e in glossary:
+        if not _HANGUL.search(e["source"]):
+            continue
+        a = aliases.get(e["source"]) or {}
+        counts = a.get("counts") or ({a["en"]: a.get("votes", 1)} if a.get("en") else {})
+        best = max(counts.values(), default=0)      # the English is not consistent either (Seong Yujin / Sung Yujin): keep the
+        names = [(n, c) for n, c in sorted(counts.items(), key=lambda x: -x[1]) if c >= max(2, best * 0.1)]  # common spellings
+        for name, votes in names + [(e["target"] if _LATIN_NAME.match(e["target"]) else None, 0)]:
+            if name and len(name) >= 3 and _name_pattern(name).search(english):
+                key = name.lower()
+                if key not in found or votes > found[key][0]:     # one English name → the best-attested Vietnamese rendering
+                    found[key] = (votes, {**e, "source": name, "ko": e["source"]})
+                break
+    for x in bridge.get("extra", []):              # terms first met in earlier English-source chapters
+        if x["source"].lower() not in found and _name_pattern(x["source"]).search(english):
+            found[x["source"].lower()] = (0, {"source": x["source"], "target": x["target"]})
+    return [v for _, v in found.values()]
+
+
 def _to_blocks(paragraphs: list[str]) -> list[dict]:
     return [{"type": "paragraph", "level": None, "align": None, "runs": [{"text": p, "b": False, "i": False, "u": False}]}
             for p in paragraphs]
@@ -93,10 +135,10 @@ def _hard(issues: list[dict]) -> list[dict]:
     return [i for i in issues if i["level"] in ("warn", "error")]
 
 
-def _term_report(entries: list[dict], korean: str, vi_text: str) -> dict:
+def _term_report(entries: list[dict], korean: str, vi_text: str, english: bool = False) -> dict:
     """How many glossary terms of this chapter appear with the chosen rendering in the new translation."""
     low = vi_text.lower()
-    present = [e for e in entries if _HANGUL.search(e["source"]) and e["source"] in korean]
+    present = entries if english else [e for e in entries if _HANGUL.search(e["source"]) and e["source"] in korean]
     ok = [e for e in present if e["target"].lower() in low]
     missing = [{"source": e["source"], "target": e["target"]} for e in present if e not in ok]
     return {"terms_in_chapter": len(present), "terms_ok": len(ok), "terms_missing": missing[:30]}
@@ -133,12 +175,19 @@ def retranslate_chapter(pid: str, number: int, *, model: str, effort: str = "med
     heading = (rec.get("ko_heading") or rec.get("ko_title") or f"{number}").strip()
     korean = "\n".join(paragraphs + [heading])
 
-    glossary_text, entries, hints = _glossary_context(pid, korean)
     glossary_all = store.get_glossary(pid)
     previous = previous_chapters(pid, number)
-    notes, examples = with_examples(store.get_notes(pid), previous, korean, [e["source"] for e in glossary_all])
+    english = not _HANGUL.search(korean)        # an English translation stands in for the missing Korean raw
+    if english:
+        entries = en_entries(glossary_all, _read_json(en_bridge_path(pid), {}) or {}, korean)
+        glossary_text, hints = glossary_prompt(entries), 0
+        keys = [e["source"] for e in entries] + [e["ko"] for e in entries if e.get("ko")]   # address examples: ko or en lines
+        notes, examples = with_examples(store.get_notes(pid), previous, " ".join(keys), keys)
+    else:
+        glossary_text, entries, hints = _glossary_context(pid, korean)
+        notes, examples = with_examples(store.get_notes(pid), previous, korean, [e["source"] for e in glossary_all])
     tail = [p for c in reversed(previous) for p in c["vi_paragraphs"][-4:]][-10:]        # oldest → newest
-    style = get_style()
+    style = get_style() + (EN_SOURCE_STYLE if english else "")
     if instruction.strip():
         style += f"\n- Yêu cầu riêng cho lần dịch lại chương này (ưu tiên cao): {instruction.strip()}"
     current = [p.strip() for p in current or [] if p.strip()]
@@ -177,7 +226,7 @@ def retranslate_chapter(pid: str, number: int, *, model: str, effort: str = "med
 
     vi_text = "\n".join(result.paragraphs)
     known = {e["source"] for e in glossary_all}
-    report = {**_term_report(entries, korean, vi_text), "hints_used": hints, "examples_used": examples, "previous_chapters": [c["number"] for c in previous],
+    report = {**_term_report(entries, korean, vi_text, english), "english_source": english, "hints_used": hints, "examples_used": examples, "previous_chapters": [c["number"] for c in previous],
               "retried": retried, "parallel_parts": parallel, "revised": bool(current),
               "refused_paragraphs": [i for i, p in enumerate(result.paragraphs) if p.startswith(REFUSED_MARK)], "new_term_conflicts": _new_term_conflicts(result.new_terms, known, previous)}
     vi_title = _TITLE_PREFIX.sub("", result.heading or "").strip()
